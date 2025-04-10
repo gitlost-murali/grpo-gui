@@ -1,2 +1,3 @@
-python main.py --output_dir "testvl" --verbose
-# python plotter.py --log_dir "final1"
+# python main.py --output_dir "120flowers_correctclassnames" --verbose
+python main.py --output_dir "120flowers_correctclassnames_final_run" --verbose
+# python plotter.py --output_dir "120flowers_correctclassnames"

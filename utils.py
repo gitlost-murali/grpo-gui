@@ -397,27 +397,29 @@ def _calculate_and_log_final_metrics(
 ## Data downoals/vision stuff ##
 ################################    
 
-def download_flower_ds(): 
-    import shutil
-    import kagglehub
-    local_dir = "data/flowers"
-    # Check if data directory already exists
-    if os.path.exists(local_dir) and os.path.isdir(local_dir) and os.listdir(local_dir):
-        print(f"Dataset already exists at: {local_dir}")
-        return
-    
-    # Download latest version
-    path = kagglehub.dataset_download("imsparsh/flowers-dataset")
-    print("Path to dataset files:", path)
-    
-    # Create directory if it doesn't exist
-    os.makedirs(local_dir, exist_ok=True)
-    
-    # Copy the dataset
-    shutil.copytree(path, local_dir)
-    print(f"Dataset copied to: {local_dir}")
+# Function removed as we are switching to torchvision's Flowers102 dataset
+# def download_flower_ds(): 
+#     import shutil
+#     import kagglehub
+#     local_dir = "data/flowers"
+#     # Check if data directory already exists
+#     if os.path.exists(local_dir) and os.path.isdir(local_dir) and os.listdir(local_dir):
+#         print(f"Dataset already exists at: {local_dir}")
+#         return
+#     
+#     # Download latest version
+#     path = kagglehub.dataset_download("imsparsh/flowers-dataset")
+#     print("Path to dataset files:", path)
+#     
+#     # Create directory if it doesn't exist
+#     os.makedirs(local_dir, exist_ok=True)
+#     
+#     # Copy the dataset
+#     shutil.copytree(path, local_dir)
+#     print(f"Dataset copied to: {local_dir}")
 
 
 
 if __name__ == "__main__":
-    download_flower_ds()
+    # download_flower_ds()
+    pass

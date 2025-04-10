@@ -8,7 +8,7 @@ import argparse
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Any
 
-from flower_dataset import build_flower_dataloaders
+from flower_dataset import build_flower_dataloaders, NUM_CLASSES
 from image_classifier import get_model, train_model
 from utils import seed_everything
 from rldatasets import get_dataloaders
@@ -54,8 +54,6 @@ def plot_training_history(history: Dict[str, List[float]], save_path: str = None
 def run_cnn_experiment(
     dataset_name: str,
     model_name: str,
-    train_samples_per_class: int = 50,
-    test_samples_per_class: int = 10,
     num_epochs: int = 10,
     batch_size: int = 32,
     learning_rate: float = 0.001,
@@ -68,8 +66,6 @@ def run_cnn_experiment(
     Args:
         dataset_name: Name of the dataset to use
         model_name: Name of the model architecture to use
-        train_samples_per_class: Number of training samples per class
-        test_samples_per_class: Number of test samples per class
         num_epochs: Number of training epochs
         batch_size: Batch size for training
         learning_rate: Learning rate for optimizer
@@ -87,12 +83,10 @@ def run_cnn_experiment(
     # Get dataloaders based on dataset name
     if dataset_name == 'flowers':
         _, _, train_loader, test_loader = build_flower_dataloaders(
-            train_samples_per_class=train_samples_per_class,
-            test_samples_per_class=test_samples_per_class,
             batch_size=batch_size,
             seed=seed
         )
-        num_classes = 5  # Flower dataset has 5 classes
+        num_classes = NUM_CLASSES
     else:
         raise ValueError(f"Dataset '{dataset_name}' not supported. Available datasets: 'flowers'")
     
@@ -133,10 +127,6 @@ def main():
                       help='Model architecture to use (default: simple_cnn)')
     
     # Training arguments
-    parser.add_argument('--train-samples', type=int, default=50,
-                      help='Number of training samples per class (default: 50)')
-    parser.add_argument('--test-samples', type=int, default=10,
-                      help='Number of test samples per class (default: 10)')
     parser.add_argument('--epochs', type=int, default=40,
                       help='Number of training epochs (default: 10)')
     parser.add_argument('--batch-size', type=int, default=32,
@@ -159,8 +149,6 @@ def main():
     run_cnn_experiment(
         dataset_name=args.dataset,
         model_name=args.model,
-        train_samples_per_class=args.train_samples,
-        test_samples_per_class=args.test_samples,
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,

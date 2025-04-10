@@ -38,6 +38,8 @@ def get_llm_tokenizer(model_name: str, device: str) -> tuple[PreTrainedModel, Pr
     processor.tokenizer.padding_side = "left"
     processor.padding_side = "left"
 
+
+    # This fixed ~'need to set the pdadding.left' but even if you do that nothing works
     model.config.use_cache = False
 
     return model, processor

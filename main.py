@@ -82,6 +82,7 @@ def eval_on_test_set(
 
         num_examples += 1
 
+
     # --- Finalization ---
     try:
         doc.build(story)
@@ -422,8 +423,9 @@ def parse_args():
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
-    parser.add_argument("--save_steps", type=int, default=100, help="Save model every N steps")
-    parser.add_argument("--eval_iterations", type=int, default=20, help="Number of iterations for evaluation")
+    parser.add_argument("--save_steps", type=int, default=500, help="Save a resumable checkpoint every N steps")
+    parser.add_argument("--eval_iterations", type=int, default=100, help="Number of iterations for evaluation")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to a checkpoint file to resume training from.")
 
     # Optimization hyperparameters
     parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate")
@@ -446,7 +448,7 @@ def parse_args():
     parser.add_argument("--max_completion_length", type=int, default=786, help="Maximum completion length")
 
     # Training parameters
-    parser.add_argument("--num_train_iters", type=int, default=1000, help="Number of training iterations")
+    parser.add_argument("--num_train_iters", type=int, default=3000, help="Number of training iterations")
     parser.add_argument("--kl_weight_beta", type=float, default=0.04, help="KL penalty weight")
     parser.add_argument("--seed", type=int, default=7111994, help="Random seed")
 
@@ -485,10 +487,15 @@ if __name__ == "__main__":
 
     # Setup logging 
     os.makedirs(args.output_dir, exist_ok=True)
-    args_dict = vars(args)
+    checkpoint_dir = os.path.join(args.output_dir, 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Only save args if not resuming (or if resuming and args.json doesn't exist)
     args_path = os.path.join(args.output_dir, 'args.json')
-    with open(args_path, 'w') as f:
-        json.dump(args_dict, f, indent=4)
+    if not args.resume_from_checkpoint or not os.path.exists(args_path):
+        args_dict = vars(args)
+        with open(args_path, 'w') as f:
+            json.dump(args_dict, f, indent=4)
+            
     eval_log_dir = os.path.join(args.output_dir, 'eval_logs')
     os.makedirs(eval_log_dir, exist_ok=True)
     train_log_dir = os.path.join(args.output_dir, 'training_logs')
@@ -511,13 +518,43 @@ if __name__ == "__main__":
             return (step / warmup_steps)
         return 1.0
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,lr_lambda=get_lr)
+    
+    start_round = 0
+    # Resume from checkpoint if specified
+    if args.resume_from_checkpoint:
+        if os.path.isfile(args.resume_from_checkpoint):
+            print(f"Resuming training from checkpoint: {args.resume_from_checkpoint}")
+            checkpoint = torch.load(args.resume_from_checkpoint, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            # Load base model state if it exists in the checkpoint (optional, depends if you also save/update it)
+            if 'base_model_state_dict' in checkpoint:
+                 base_model.load_state_dict(checkpoint['base_model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_round = checkpoint['round_num'] + 1 # Start from the next round
+            print(f"Loaded checkpoint. Resuming from round {start_round}")
+            temp_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: get_lr(step + start_round))
+            scheduler = temp_scheduler 
+        else:
+            print(f"Warning: Checkpoint file not found at {args.resume_from_checkpoint}. Starting training from scratch.")
 
 
     # Begin training 
     accumulated_loss = 0
     optimizer.zero_grad()
     train_metrics_total = {}
-    for round_num in tqdm(range(args.num_train_iters), desc="Training Progress"):
+    if os.path.exists(os.path.join(train_log_dir, "train_logs.json")):
+         with open(os.path.join(train_log_dir, "train_logs.json"), "r") as f:
+            # Load existing logs if resuming
+            try:
+                train_metrics_total = json.load(f)
+                 # Convert string keys back to integers if necessary
+                train_metrics_total = {int(k): v for k, v in train_metrics_total.items()}
+            except json.JSONDecodeError:
+                 print("Warning: Could not parse existing train_logs.json. Starting with empty logs.")
+                 train_metrics_total = {}
+
+    for round_num in tqdm(range(start_round, args.num_train_iters), initial=start_round, total=args.num_train_iters, desc="Training Progress"):
     
         # Evaluate on test set every so often 
         if round_num % args.eval_iterations == 0:
@@ -563,16 +600,28 @@ if __name__ == "__main__":
             optimizer.step()
             optimizer.zero_grad()    
 
+        # Save checkpoint
+        if (round_num + 1) % args.save_steps == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_round_{round_num}.pt')
+            torch.save({
+                'round_num': round_num,
+                'model_state_dict': model.state_dict(),
+                'base_model_state_dict': base_model.state_dict(), # Save base model state too
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'args': args # Save args for reference
+            }, checkpoint_path)
+            print(f"Checkpoint saved to {checkpoint_path}")
+
         # Logs
         train_metrics["learning_rate"] = scheduler.get_last_lr()[0]
-        train_metrics["loss"] = total_loss.item() * args.gradient_accumulation_steps
+        train_metrics["loss"] = total_loss.item() # * args.gradient_accumulation_steps - Loss is already averaged over accumulation steps before backward
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf')).item()
         train_metrics["grad_norm"] = grad_norm
         train_metrics_total[round_num] = train_metrics
         with open(os.path.join(train_log_dir, "train_logs.json"), "w") as f:
             json.dump(train_metrics_total, f, indent=4)
-       
 
-"""
-# TODO: - very specifgic to Qwen Omni - should make more general, at leaast via prompting. Although dif
-"""
+        # Add after each major operation in the training loop
+        torch.cuda.empty_cache()
+       

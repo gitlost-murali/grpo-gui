@@ -6,7 +6,12 @@ import json
 import torch
 import argparse
 from tqdm import tqdm
+import soundfile as sf
+from typing import Optional
+from shutil import copyfile
 from collections import defaultdict
+from qwen_vl_utils import process_vision_info
+
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig
 
 import llms
@@ -24,96 +29,81 @@ def eval_on_test_set(
     round_num: int
 ) -> tuple[dict[str, float], float]:
     """
-    Evaluate model performance on test set.
-    
-    Args:
-        model: The model to evaluate
-        tokenizer: Tokenizer for the model
-        test_loader: DataLoader for test set
-        eval_class: Evaluator for computing rewards
-        device: Device to run on
-        args: Training arguments
-        round_num: Current training round number
-        
-    Returns:
-        total_scores: Dictionary of average metrics
-        accuracy: Accuracy on test set
+    Evaluate model performance on test set with improved logging and PDF reports.
+    (Orchestrates evaluation using helper functions).
     """
     print("Running evaluation on test set...")
     
-    # Track metrics across all test examples
-    total_scores = defaultdict(float)
+    # --- Initialization ---
     num_examples = 0
-    total_accuracy = 0.0
-
-    # Create log file for this evaluation round
-    log_file = os.path.join(args.output_dir, f'eval_metrics_{round_num}.txt')
-    test_loader.reset()
+    total_correct = 0
+    num_total_chains_processed = 0 
+    aggregated_metrics = defaultdict(float)
     
-    with open(log_file, 'w') as f:
-        # Run through test set
-        for question, answer in tqdm(test_loader, desc="Evaluating on test set"):
-            # Generate completions using same function as training
-            _, _, _, _, completions_text, _ = generate_completions(
-                model, tokenizer, question, device, args
+    _, pdf_dir, json_dir = utils._setup_eval_directories(args.output_dir)
+    pdf_path = os.path.join(pdf_dir, f'eval_results_{round_num}.pdf')
+    doc, styles, story = utils._setup_pdf(pdf_path)
+    
+    test_loader.reset()
+
+    # --- Evaluation Loop ---
+    for batch in tqdm(test_loader, desc="Evaluating on test set"):
+        img_path, answer = batch
+        
+        # Generate
+        _, _, _, _, completions_text, _ = generate_completions(
+            model, tokenizer, img_path, test_loader.prompt, device, args, eval=True)
+        
+        # Add example header to PDF
+        utils._add_example_header_to_pdf(story, styles, img_path, test_loader.prompt, answer, num_examples + 1)
+        
+
+        # Process each completion
+        example_total_correct = 0
+        example_num_chains = 0
+        for completion_idx, completion_text in enumerate(completions_text):
+            metrics_single, num_correct, num_total = utils._process_single_completion_for_eval(
+                completion_text, eval_class, answer, device, story, styles, completion_idx
             )
             
-            # Score completions using evaluator
-            mock_prompts = [[{'content': question}]] * len(completions_text)
-            mock_completions = [[{'content': completion}] for completion in completions_text]
-            # Make answer array same length as completions
-            answers = [answer] * len(completions_text)
-            rewards_per_func, metrics = eval_class.compute_rewards(
-                prompts=mock_prompts,
-                completions=mock_completions, 
-                answer=answers,
-                device=device
-            )
+            # Accumulate metrics
+            if metrics_single and isinstance(metrics_single, dict):
+                for metric_name, value in metrics_single.items():
+                    if isinstance(value, (int, float)): 
+                        aggregated_metrics[metric_name] += value
+                    elif torch.is_tensor(value) and value.numel() == 1:
+                         aggregated_metrics[metric_name] += value.item()
             
-            # Track accuracy and accumulate metrics
-            total_accuracy += metrics['accuracy']
-                
-            for k, v in metrics.items():
-                total_scores[k] += v
-            num_examples += 1
+            example_total_correct += num_correct
+            example_num_chains += num_total
 
-            # Log this example
-            f.write("\n" + "="*50 + "\n")
-            f.write(f"Q# {num_examples}\n")
-            f.write(f"Question: {question}\n")
-            f.write(f"Response: {completions_text[0]}\n") # Log first completion
-            f.write(f"Ground Truth: {answer}\n")
-            f.write("Metrics:\n")
-            for metric, value in metrics.items():
-                f.write(f"{metric}: {value}\n")
-            f.write(f"Total Score: {rewards_per_func.sum().item()}\n")
+        total_correct += example_total_correct
+        num_total_chains_processed += example_num_chains
 
+        num_examples += 1
 
-    # Calculate averages
-    avg_scores = {k: v/num_examples for k,v in total_scores.items()}
-    accuracy = total_accuracy / num_examples * 100
+    # --- Finalization ---
+    try:
+        doc.build(story)
+        print(f"Evaluation PDF saved to: {pdf_path}")
+    except Exception as e:
+        print(f"Error generating PDF: {e}")
 
-    # Save metrics
-    metrics_path = os.path.join(args.output_dir, f'eval_metrics_{round_num}.json')
-    with open(metrics_path, 'w') as f:
-        json.dump({**avg_scores, 'accuracy': accuracy}, f, indent=4)
-
-    if args.verbose:
-        print("\nEvaluation Results:")
-        print("-" * 20)
-        print(f"Accuracy: {accuracy:.2f}%")
-        for metric, value in avg_scores.items():
-            print(f"{metric:15s}: {value:.4f}")
-        print("-" * 20)
+    avg_scores, accuracy = utils._calculate_and_log_final_metrics(
+        aggregated_metrics, total_correct, num_total_chains_processed, 
+        num_examples, json_dir, round_num, args.verbose
+    )
 
     return avg_scores, accuracy
 
 def generate_completions(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerBase, 
-    question: str,
+    image_path: str,
+    prompt: str,
     device: str,
-    args: argparse.Namespace
+    args: argparse.Namespace, 
+    eval: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], str]:
     """
     Generate multiple completion sequences for a given prompt using a language model.
@@ -121,7 +111,8 @@ def generate_completions(
     Args:
         model: The language model to use for generation
         tokenizer: Tokenizer corresponding to the model
-        question: The input question/prompt to generate completions for
+        image_path: The input image path to generate completions for
+        prompt: The input prompt to generate completions for
         device: Device to run generation on ('cpu' or 'cuda')
         args: Namespace containing generation parameters
         
@@ -133,64 +124,91 @@ def generate_completions(
         completions_text: List of decoded completion texts
         prompt_text: The full formatted prompt text
     """
-    # 1. Prepare prompting
-    prompt = [
-        {'role': 'system', 'content': train_loader.system_prompt},
-        {'role': 'user', 'content': question}
+
+    conversation = [
+        {
+            "role": "system",
+            "content": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group. You are an expert image analyst.",
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image_path},
+                {"type": "text", "text": prompt}
+
+            ],
+        },
     ]
-    prompt_text = tokenizer.apply_chat_template(prompt, tokenize=False)
-    prompt_inputs = tokenizer(prompt_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False)
-    prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
-    # Truncate prompt to max length and repeat for number of generations
-    prompt_ids = prompt_ids[:, -args.max_prompt_length:]
-    prompt_mask = prompt_mask[:, -args.max_prompt_length:]
-    
-    # Repeat for number of chains/generations
-    prompt_ids = prompt_ids.repeat(args.num_chains, 1)
-    prompt_mask = prompt_mask.repeat(args.num_chains, 1)
+    text = tokenizer.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)  
+    image_inputs, video_inputs = process_vision_info(conversation)
 
-    # Move tensors to device
-    prompt_ids = prompt_ids.to(device)
-    prompt_mask = prompt_mask.to(device)
+    # Ensure left padding for tokenizer/processor before tokenizing
+    prompt_inputs = tokenizer(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    ).to(model.device).to(model.dtype)
+
+    # Repeat input tensors for batch generation
+    if eval:
+        num_chains = args.num_chains_eval
+    else:
+        num_chains = args.num_chains
+    batched_prompt_inputs = {}
+    for key, value in prompt_inputs.items():
+        if torch.is_tensor(value):
+            batched_prompt_inputs[key] = value.repeat(num_chains, *([1] * (value.dim() - 1)))
+        else:
+            # Handle non-tensor items if necessary, otherwise just copy
+            batched_prompt_inputs[key] = value 
+
+    # Original prompt_ids/mask are needed for splitting later
+    original_prompt_ids = prompt_inputs["input_ids"]
 
     # Set up generation config
     generation_config = GenerationConfig(
         max_new_tokens=args.max_completion_length,
-        do_sample=True, 
+        do_sample=True,
         temperature=args.temperature,
-        pad_token_id=tokenizer.pad_token_id
+        pad_token_id=tokenizer.tokenizer.pad_token_id,
     )
 
-    # Generate completions
+    # Generate all completions at once
     prompt_completion_ids = model.generate(
-        prompt_ids,
-        attention_mask=prompt_mask,
+        **batched_prompt_inputs,
         generation_config=generation_config
+
     )
 
+    
     # Extract completion ids
-    prompt_length = prompt_ids.size(1)
-    prompt_ids = prompt_completion_ids[:, :prompt_length]
+    # Use the original prompt length before repeating
+    prompt_length = original_prompt_ids.size(1) 
+    prompt_ids = prompt_completion_ids[:, :prompt_length] # These are the batched prompt IDs
     completion_ids = prompt_completion_ids[:, prompt_length:]
 
     # Do masking 
-    is_eos = completion_ids == tokenizer.eos_token_id
+    is_eos = completion_ids == tokenizer.tokenizer.eos_token_id
     eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
     eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
     sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
     completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
 
+    # Create attention mask based on original prompt mask repeated and completion mask
+    prompt_mask = batched_prompt_inputs["attention_mask"] # Use the repeated mask
     attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
 
     # Decode completions
-    completions_text = tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
-
-    return prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, prompt_text
+    completions_text = tokenizer.batch_decode(completion_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    return prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, prompt
     
 def score_completions(
     completions_text: list[str],
-    question: str,
+    prompt: str,
+    image_path: str,
     answer: str,
     eval_class: evaluator.RewardEvaluator,
     device: str,
@@ -217,24 +235,19 @@ def score_completions(
     # Build log data dictionary
     log_data = {
         'prompt': {
-            'text': question,
-            'answer': answer
+            'text': prompt,
+            'answer': answer, 
+            'image_path': image_path
         },
         'generations': []
     }
-
-    # Format inputs as expected by evaluator
-    mock_prompts = [[{'content': question}]] * len(completions_text)
-    mock_completions = [[{'content': completion}] for completion in completions_text]
-    answers = [answer] * len(completions_text)
     
-    # Get rewards and metrics from evaluator
+    # Format inputs as expected by evaluator
+    mock_completions = [[{'content': completion}] for completion in completions_text]
     rewards_per_func, metrics = eval_class.compute_rewards(
-        prompts=mock_prompts,
-        completions=mock_completions,
-        answer=answers,
-        device=device
+        prompts=None, completions=mock_completions, answer=answer, device=device
     )
+
     rewards = rewards_per_func.sum(dim=1)
 
     # Store generation data
@@ -276,7 +289,10 @@ def compute_loss(
     attention_mask: torch.Tensor,
     completion_mask: torch.Tensor,
     advantages: torch.Tensor,
-    args: argparse.Namespace
+    args: argparse.Namespace,
+    img_path: str,
+    tokenizer: PreTrainedTokenizerBase, 
+    prompt: str
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Compute the GRPO loss between current and base model.
@@ -302,11 +318,10 @@ def compute_loss(
 
     # Get reference model logits
     with torch.inference_mode():
-        ref_per_token_logps = utils.get_per_token_logps(base_model, prompt_completion_ids, attention_mask, logits_to_keep)
+        ref_per_token_logps = utils.get_per_token_logps_vl(base_model, prompt_completion_ids, attention_mask, img_path, tokenizer, logits_to_keep, prompt)
 
     # Get training model logits
-    input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-    per_token_logps = utils.get_per_token_logps(model, input_ids, attention_mask, logits_to_keep)
+    per_token_logps = utils.get_per_token_logps_vl(model, prompt_completion_ids, attention_mask, img_path, tokenizer, logits_to_keep, prompt)
 
     # Compute KL divergence
     per_token_kl = torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
@@ -325,11 +340,13 @@ def compute_loss(
 
     return loss, metrics
 
+
 def grpo_loss(
         model: PreTrainedModel,
         base_model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
-        question: str,
+        prompt: str,
+        img_path: str,
         answer: str,
         eval_class: evaluator.RewardEvaluator,
         device: str,
@@ -344,7 +361,8 @@ def grpo_loss(
         model: The current model being trained
         base_model: The reference model to compare against
         tokenizer: Tokenizer for the models
-        question: Input question/prompt
+        prompt: Prompt for the model
+        img_path: Path to the image
         answer: Ground truth answer
         eval_class: Evaluator for computing rewards
         device: Device to run on ('cpu' or 'cuda')
@@ -357,25 +375,34 @@ def grpo_loss(
         metrics: Dictionary containing training metrics
         reward: The total reward for this batch
     """
+
+
+
     # Generate completions
     prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, prompt_text = generate_completions(
-        model, tokenizer, question, device, args
+        model, tokenizer, img_path, prompt, device, args
     )
+
 
     # Score completions
     rewards, advantages, rewards_per_func, metrics, log_data = score_completions(
-        completions_text, question, answer, eval_class, device, args
+        completions_text, prompt, img_path, answer, eval_class, device, args
     )
 
     # Write log data
     log_file = os.path.join(training_log_dir, f'{round_num}_generations.txt')
     utils.write_generation_log(log_data, log_file)
+    image_log_dir = os.path.join(training_log_dir, 'images')
+    os.makedirs(image_log_dir, exist_ok=True)
+    image_log_path = os.path.join(image_log_dir, f'image_{round_num}.png')
+    copyfile(img_path, image_log_path)
+
 
     # Compute loss
     completion_mask = attention_mask[:, prompt_ids.size(1):]
     loss, loss_metrics = compute_loss(
         model, base_model, prompt_completion_ids, prompt_ids, completion_ids,
-        attention_mask, completion_mask, advantages, args
+        attention_mask, completion_mask, advantages, args, img_path, tokenizer, prompt
     )
 
     # Combine metrics
@@ -388,9 +415,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="GRPO training arguments")
     
     # Model configuration
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name/path of base model")
-    parser.add_argument("--dataset_name", type=str, default="gsm8k", help="Dataset to use for training")
-    parser.add_argument("--evaluator", type=str, default="gsm8k", help="Evaluator to use for scoring")
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Omni-7B", help="Name/path of base model")
+    parser.add_argument("--dataset_name", type=str, default="flowers", help="Dataset to use for training")
+    parser.add_argument("--evaluator", type=str, default="flowers", help="Evaluator to use for scoring")
 
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
@@ -414,6 +441,7 @@ def parse_args():
     # Generation parameters
     parser.add_argument("--temperature", type=float, default=0.9, help="Sampling temperature")
     parser.add_argument("--num_chains", type=int, default=16, help="Number of parallel generation chains")
+    parser.add_argument("--num_chains_eval", type=int, default=2, help="Number of parallel generation chains for evaluation")
     parser.add_argument("--max_prompt_length", type=int, default=256, help="Maximum prompt length")
     parser.add_argument("--max_completion_length", type=int, default=786, help="Maximum completion length")
 
@@ -518,11 +546,11 @@ if __name__ == "__main__":
                     ref_param.data = args.ref_model_mixup_alpha * param.data + (1 - args.ref_model_mixup_alpha) * ref_param.data
 
         # Get next question
-        question, answer = next(train_loader)
+        batch = next(train_loader)
+        img_path, answer = batch
 
         # Do GRPO - generate chains, score, compute advantage, compute loss 
-        total_loss, train_metrics = grpo_loss(model, base_model, tokenizer, question, answer, eval_class, device, round_num, train_log_dir, args)
-        
+        total_loss, train_metrics = grpo_loss(model, base_model, tokenizer, train_loader.prompt, img_path, answer, eval_class, device, round_num, train_log_dir, args)
         # Gradient accumulation
         total_loss = total_loss # / args.gradient_accumulation_steps
         total_loss.backward()
@@ -544,3 +572,7 @@ if __name__ == "__main__":
         with open(os.path.join(train_log_dir, "train_logs.json"), "w") as f:
             json.dump(train_metrics_total, f, indent=4)
        
+
+"""
+# TODO: - very specifgic to Qwen Omni - should make more general, at leaast via prompting. Although dif
+"""

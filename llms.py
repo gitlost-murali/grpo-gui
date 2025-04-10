@@ -5,6 +5,8 @@ Module for loading LLMs and their tokenizers from huggingface.
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase
 
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+from qwen_vl_utils import process_vision_info
 
 def get_llm_tokenizer(model_name: str, device: str) -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
     """
@@ -19,15 +21,23 @@ def get_llm_tokenizer(model_name: str, device: str) -> tuple[PreTrainedModel, Pr
             - The loaded language model
             - The configured tokenizer for that model
     """
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        "Qwen/Qwen2.5-VL-7B-Instruct",
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        device_map=None, 
-    ).to(device)
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.pad_token = tokenizer.eos_token
-    model.config.pad_token_id = tokenizer.pad_token_id
-    
-    return model, tokenizer
+        device_map="auto",
+    )
+
+    # default processer
+    processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+
+    processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    model.config.pad_token_id = processor.tokenizer.pad_token_id
+
+    processor.tokenizer.padding_side = "left"
+    processor.padding_side = "left"
+
+    model.config.use_cache = False
+
+    return model, processor

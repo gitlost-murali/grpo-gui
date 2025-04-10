@@ -6,9 +6,11 @@ Hold all data sets
 import random
 import numpy as np
 from tqdm import tqdm
-from datasets import load_dataset, Dataset
-from abc import ABC, abstractmethod
 from typing import Tuple, Any
+from abc import ABC, abstractmethod
+from datasets import load_dataset, Dataset
+from flower_dataset import build_flower_dataloaders
+
 
 
 
@@ -122,6 +124,10 @@ class GSM8KLoader(DataLoader):
         self.current_index = 0 
 
 
+
+
+
+
 def build_gsm8k_dataloaders() -> Tuple[GSM8KLoader, GSM8KLoader]: 
     data = load_dataset('openai/gsm8k', 'main')["train"]
 
@@ -165,12 +171,15 @@ def build_gsm8k_dataloaders() -> Tuple[GSM8KLoader, GSM8KLoader]:
     return trainloader, testloader
 
 
+
+
+
 def get_dataloaders(dataset_name: str) -> Tuple[DataLoader, DataLoader]:
     """
     Factory function to get train and test data loaders for a specified dataset.
     
     Args:
-        dataset_name (str): Name of the dataset to load ('gsm8k' currently supported)
+        dataset_name (str): Name of the dataset to load ('gsm8k' or 'flowers' currently supported)
         
     Returns:
         Tuple[DataLoader, DataLoader]: Train and test data loaders
@@ -180,8 +189,11 @@ def get_dataloaders(dataset_name: str) -> Tuple[DataLoader, DataLoader]:
     """
     if dataset_name.lower() == 'gsm8k':
         return build_gsm8k_dataloaders()
+    elif dataset_name.lower() == 'flowers':
+        train_rl_loader, test_rl_loader, _, _ = build_flower_dataloaders()
+        return train_rl_loader, test_rl_loader
     else:
-        raise ValueError(f"Dataset {dataset_name} not supported. Currently only 'gsm8k' is available.")
+        raise ValueError(f"Dataset '{dataset_name}' not supported. Available datasets: 'gsm8k', 'flowers'")
 
 
 if __name__ == "__main__": 

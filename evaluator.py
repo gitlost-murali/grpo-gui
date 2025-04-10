@@ -77,6 +77,8 @@ def get_evaluator(name: str) -> RewardEvaluator:
     """
     if name.lower() == "gsm8k":
         return GSM8kEvaluator()
+    elif name.lower() == "flowers":
+        return FlowerEvaluator()
     else:
         raise NotImplementedError(f"No evaluator implemented for {name}")
 
@@ -198,4 +200,123 @@ class GSM8kEvaluator(RewardEvaluator):
             'strict_format': reward_scores[2].item(),
             'soft_format': reward_scores[3].item(),
             'xml_count': reward_scores[4].item()
+        }
+
+class FlowerEvaluator(RewardEvaluator):
+    """
+    Reward evaluator for the flower classification task.
+    
+    Implements reward functions for:
+    - Answer correctness
+    - XML formatting (strict and soft)
+    - XML tag counting
+    - Reasoning quality
+    """
+    
+    def __init__(self):
+        self.num_reward_functions = 4
+        
+    def _extract_xml_answer(self, text: str) -> str:
+        """Extract answer from XML tags."""
+        try:
+            answer = text.split("<answer>")[-1]
+            answer = answer.split("</answer>")[0]
+            # Extract the flower type from "this flower is a [type]"
+            flower_type = answer.lower().split("this flower is a ")[-1].strip().rstrip('.')
+            return flower_type
+        except:
+            return ""
+    
+    def _correctness_reward(self, prompts, completions, answer) -> List[float]:
+        """Reward for correct answer."""
+        responses = [completion[0]['content'] for completion in completions]
+        # Convert both completion and answer to lowercase for case-insensitive matching
+        responses_lower = [r.lower() for r in responses]
+        answer_lower = answer.lower()
+        # Check if answer is in the completion
+        return [2.0 if answer_lower in r else 0.0 for r in responses_lower]
+
+    def _strict_format_reward(self, completions) -> List[float]:
+        """Reward for strict XML format."""
+        pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
+        responses = [completion[0]["content"] for completion in completions]
+        matches = [bool(re.match(pattern, r)) for r in responses]
+        return [0.5 if m else 0.0 for m in matches]
+
+    def _soft_format_reward(self, completions) -> List[float]:
+        """Reward for relaxed XML format."""
+        pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
+        responses = [completion[0]["content"] for completion in completions]
+        matches = [bool(re.match(pattern, r)) for r in responses]
+        return [0.5 if m else 0.0 for m in matches]
+
+    def _reasoning_quality_reward(self, completions) -> List[float]:
+        """Reward for reasoning quality based on length and keyword presence."""
+        def score_reasoning(text: str) -> float:
+            try:
+                reasoning = text.split("<reasoning>")[-1].split("</reasoning>")[0].strip()
+                # Base score on length (up to 0.5)
+                length_score = min(len(reasoning.split()) / 50.0, 0.5)
+                
+                # Check for visual feature keywords (up to 0.5)
+                keywords = ['petal', 'color', 'shape', 'center', 'stem', 'pattern', 'size']
+                keyword_count = sum(1 for k in keywords if k in reasoning.lower())
+                keyword_score = min(keyword_count / len(keywords), 0.5)
+                
+                return length_score + keyword_score
+            except:
+                return 0.0
+            
+        responses = [completion[0]["content"] for completion in completions]
+        return [score_reasoning(r) for r in responses]
+
+    def compute_rewards(
+        self,
+        prompts: List[List[Dict[str, str]]],
+        completions: List[List[Dict[str, str]]],
+        answer: Any,
+        device: str
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute all rewards for the given completions."""
+        num_completions = len(completions)
+        rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
+
+        # Compute all reward functions
+        all_scores = [
+            self._correctness_reward(prompts, completions, answer),
+            self._strict_format_reward(completions),
+            self._soft_format_reward(completions),
+            self._reasoning_quality_reward(completions)
+        ]
+        
+        # Fill rewards tensor
+        for i, scores in enumerate(all_scores):
+            rewards_per_func[:, i] = torch.tensor(scores, dtype=torch.float32, device=device)
+        
+        # Compute metrics
+        reward_per_func = rewards_per_func.mean(0)
+        
+        # Calculate accuracy (perfect correctness score)
+        correctness_scores = rewards_per_func[:, 0]  # First reward function is correctness
+        num_correct = (correctness_scores == 2.0).sum().item()
+        
+        metrics = {
+            "rewards/correctness_reward_func": reward_per_func[0].item(),
+            "rewards/strict_format_reward_func": reward_per_func[1].item(),
+            "rewards/soft_format_reward_func": reward_per_func[2].item(),
+            "rewards/reasoning_quality_reward_func": reward_per_func[3].item(),
+            "reward": rewards_per_func.sum(dim=1).mean().item(),
+            "num_correct": num_correct, 
+            "num_total": num_completions
+        }
+        
+        return rewards_per_func, metrics
+
+    def get_reward_breakdown(self, reward_scores: torch.Tensor) -> Dict[str, float]:
+        """Convert reward scores tensor to labeled dictionary."""
+        return {
+            'correctness': reward_scores[0].item(),
+            'strict_format': reward_scores[1].item(),
+            'soft_format': reward_scores[2].item(),
+            'reasoning_quality': reward_scores[3].item()
         }

@@ -36,7 +36,6 @@ def eval_on_test_set(
     
     # --- Initialization ---
     num_examples = 0
-    total_correct = 0
     num_total_chains_processed = 0 
     aggregated_metrics = defaultdict(float)
     
@@ -54,15 +53,16 @@ def eval_on_test_set(
         _, _, _, _, completions_text, _ = generate_completions(
             model, tokenizer, img_path, test_loader.prompt, device, args, eval=True)
         
+        
         # Add example header to PDF
-        utils._add_example_header_to_pdf(story, styles, img_path, test_loader.prompt, answer, num_examples + 1)
+        utils._add_example_header_to_pdf(story, styles, img_path, test_loader.prompt, answer, num_examples)
         
 
         # Process each completion
-        example_total_correct = 0
+        example_total_errors = 0
         example_num_chains = 0
         for completion_idx, completion_text in enumerate(completions_text):
-            metrics_single, num_correct, num_total = utils._process_single_completion_for_eval(
+            metrics_single = utils._process_single_completion_for_eval(
                 completion_text, eval_class, answer, device, story, styles, completion_idx
             )
             
@@ -74,28 +74,25 @@ def eval_on_test_set(
                     elif torch.is_tensor(value) and value.numel() == 1:
                          aggregated_metrics[metric_name] += value.item()
             
-            example_total_correct += num_correct
-            example_num_chains += num_total
-
-        total_correct += example_total_correct
-        num_total_chains_processed += example_num_chains
-
+            example_total_errors += metrics_single["metrics/mean_abs_error_seconds"]
+            num_total_chains_processed += 1
         num_examples += 1
 
 
-    # --- Finalization ---
-    try:
-        doc.build(story)
-        print(f"Evaluation PDF saved to: {pdf_path}")
-    except Exception as e:
-        print(f"Error generating PDF: {e}")
+    # Take average of all errors
+    avg_error = example_total_errors / num_total_chains_processed
+    avg_scores = {}
+    for metric_name, total_value in aggregated_metrics.items():
+        avg_scores[f"avg_{metric_name}"] = total_value / num_total_chains_processed
+    avg_scores["avg_error"] = avg_error
 
-    avg_scores, accuracy = utils._calculate_and_log_final_metrics(
-        aggregated_metrics, total_correct, num_total_chains_processed, 
-        num_examples, json_dir, round_num, args.verbose
-    )
+    # build pdf
+    doc.build(story)
 
-    return avg_scores, accuracy
+    # log final metrics
+    utils._calculate_and_log_final_metrics(avg_scores, json_dir, round_num, args.verbose)
+
+    return avg_error, avg_scores
 
 def generate_completions(
     model: PreTrainedModel,
@@ -246,7 +243,10 @@ def score_completions(
     # Format inputs as expected by evaluator
     mock_completions = [[{'content': completion}] for completion in completions_text]
     rewards_per_func, metrics = eval_class.compute_rewards(
-        prompts=None, completions=mock_completions, answer=answer, device=device
+        prompts=None, 
+        completions=mock_completions, 
+        answers=[answer] * len(completions_text),  # Pass list of answers
+        device=device
     )
 
     rewards = rewards_per_func.sum(dim=1)
@@ -416,9 +416,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="GRPO training arguments")
     
     # Model configuration
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Omni-7B", help="Name/path of base model")
-    parser.add_argument("--dataset_name", type=str, default="flowers", help="Dataset to use for training")
-    parser.add_argument("--evaluator", type=str, default="flowers", help="Evaluator to use for scoring")
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen-VL-Chat", help="Name/path of base model")
+    parser.add_argument("--dataset_name", type=str, default="clock", help="Dataset to use for training")
 
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
@@ -480,7 +479,7 @@ if __name__ == "__main__":
     train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name)
 
     ## Set which evaluation criteria to use 
-    eval_class = evaluator.get_evaluator(args.evaluator)
+    eval_class = evaluator.get_evaluator(args.dataset_name)
 
     ###############################
 
@@ -567,6 +566,7 @@ if __name__ == "__main__":
                 args=args,
                 round_num=round_num
             )
+
             
             # Save metrics to eval log dir
             metrics_path = os.path.join(eval_log_dir, f'metrics_{round_num}.json')
@@ -587,12 +587,17 @@ if __name__ == "__main__":
         img_path, answer = batch
 
         # Do GRPO - generate chains, score, compute advantage, compute loss 
-        total_loss, train_metrics = grpo_loss(model, base_model, tokenizer, train_loader.prompt, img_path, answer, eval_class, device, round_num, train_log_dir, args)
+        total_loss, train_metrics = grpo_loss(
+            model, base_model, tokenizer, train_loader.prompt, img_path, answer, 
+            eval_class, device, round_num, train_log_dir, args
+        )
         # Gradient accumulation
-        total_loss = total_loss # / args.gradient_accumulation_steps
+        total_loss = total_loss / args.gradient_accumulation_steps 
         total_loss.backward()
         accumulated_loss += total_loss.item()
-        scheduler.step()
+        # LR scheduler step should ideally happen after optimizer step, 
+        # but keeping original structure for minimal changes for now.
+        scheduler.step() 
 
         # Step optimizer
         if (round_num + 1) % args.gradient_accumulation_steps == 0:

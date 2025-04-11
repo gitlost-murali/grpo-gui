@@ -48,8 +48,8 @@ def seed_everything(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
-
+# Add set_seed (alias for seed_everything)
+set_seed = seed_everything
 def write_generation_log(log_data: Dict[str, Any], log_file: str) -> None:
     """
     Write generation log data to a text file.
@@ -215,8 +215,14 @@ def _extract_tagged_content(text: str, tag: str) -> Optional[str]:
         return match.group(1).strip()
     return None
 
-def _setup_eval_directories(output_dir: str) -> tuple[str, str, str, str]:
-    """Creates and returns paths for evaluation log directories."""
+def _setup_training_log_directory(output_dir: str) -> str:
+    """Creates and returns the path for the training log directory."""
+    training_log_dir = os.path.join(output_dir, "training_logs")
+    os.makedirs(training_log_dir, exist_ok=True)
+    return training_log_dir
+
+def _setup_eval_directories(output_dir: str) -> tuple[str, str, str]:
+    """Creates and returns paths for evaluation log directories (PDF and JSON)."""
     eval_logs_dir = os.path.join(output_dir, "eval_logs")
     pdf_dir = os.path.join(eval_logs_dir, "pdfs")
     json_dir = os.path.join(eval_logs_dir, "json")
@@ -231,6 +237,8 @@ def _setup_pdf(pdf_path: str) -> tuple[SimpleDocTemplate, dict, list]:
     story = [] 
     styles['Code'].fontSize = 10 
     styles.add(ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold'))
+    # Add a justified style for longer text blocks
+    styles.add(ParagraphStyle(name='Justified', parent=styles['Normal'], alignment=TA_JUSTIFY))
     return doc, styles, story
 
 def _add_example_header_to_pdf(
@@ -293,18 +301,15 @@ def _process_single_completion_for_eval(
     styles: dict,
     completion_idx: int
 ) -> tuple[dict, int, int]:
-    """ Computes rewards, formats PDF content, and returns metrics/counts for one completion."""
-    mock_completion = [{'content': completion_text}]
-    rewards_per_func, metrics_single = eval_class.compute_rewards(
-        prompts=None, completions=[mock_completion], answer=answer, device=device
-    )
-
-    # --- Add completion details to PDF ---
+    """ 
+    Computes rewards, formats PDF content, and returns metrics/counts for one completion.
+    Adapts to ClockEvaluator metrics while preserving original return signature.
+    """
+    # --- Add completion details to PDF (Existing logic) ---
     story.append(Paragraph(f"Response #{completion_idx + 1}:", styles['Bold']))
     story.append(Paragraph("Full Response:", styles['Italic']))
     escaped_completion_text = html.escape(completion_text) 
     story.append(Paragraph(escaped_completion_text, styles['Code']))
-    story.append(Spacer(1, 0.1 * inch))
 
     reasoning = _extract_tagged_content(completion_text, 'reasoning')
     extracted_answer = _extract_tagged_content(completion_text, 'answer')
@@ -318,6 +323,19 @@ def _process_single_completion_for_eval(
     story.append(Spacer(1, 0.1 * inch))
 
     story.append(Paragraph("Metrics:", styles['Italic']))
+    # --- End Add completion details to PDF ---
+
+    # Evaluate the single completion using ClockEvaluator
+    mock_completion = [[{'role': 'assistant', 'content': completion_text}]]
+    # Ensure answers is a list, expected by ClockEvaluator
+    answers_list = [answer] if not isinstance(answer, list) else answer 
+    rewards_per_func, metrics_single = eval_class.compute_rewards(
+        prompts=None, 
+        completions=mock_completion, 
+        answers=answers_list, # Pass list of answers
+        device=device
+    )
+    # Add calculated metrics to PDF
     if metrics_single:
         metric_items = [f"- {metric}: {value:.4f}" for metric, value in metrics_single.items()]
         for item in metric_items:
@@ -325,101 +343,37 @@ def _process_single_completion_for_eval(
     else:
          story.append(Paragraph("- <i>Metrics computation failed or N/A</i>", styles['Normal']))
 
-    story.append(Paragraph(f"Total Score: {rewards_per_func.sum().item():.4f}", styles['Normal']))
+    # Calculate total score for this completion (sum of reward components)
+    total_score = rewards_per_func.sum().item() if rewards_per_func is not None else 0.0
+    story.append(Paragraph(f"Total Score: {total_score:.4f}", styles['Normal']))
     story.append(Spacer(1, 0.2 * inch))
-    # --- End Completion PDF details ---
 
-    # Extract counts for aggregation
-    num_correct = 0
-    num_total = 1 # Default to 1 completion if not specified
-    if metrics_single and isinstance(metrics_single, dict):
-        num_correct = metrics_single.get('num_correct', 0)
-        num_total = metrics_single.get('num_total', 1)
-        
-    return metrics_single, num_correct, num_total
+            
+    return metrics_single
 
 def _calculate_and_log_final_metrics(
-    aggregated_metrics: defaultdict,
-    total_correct: int,
-    num_total_chains_processed: int,
-    num_examples: int,
+    avg_scores: dict[str, float],
     json_dir: str,
     round_num: int,
     verbose: bool
-) -> tuple[dict[str, float], float]:
-    """ Calculates final averages, saves JSON, prints verbose output, and returns results."""
-    avg_scores = {}
-    accuracy = 0.0 
-
-    if num_total_chains_processed > 0:
-        for metric_name, total_value in aggregated_metrics.items():
-            if 'num_' in metric_name: 
-                 avg_scores[f"avg_{metric_name}"] = total_value / num_total_chains_processed
-            elif num_examples > 0:
-                 avg_scores[f"avg_{metric_name}"] = total_value / num_examples
-            else:
-                 avg_scores[f"avg_{metric_name}"] = 0.0
-        accuracy = (total_correct / num_total_chains_processed) * 100
-    else:
-        print("Warning: No completions were processed during evaluation.")
-        for metric_name in aggregated_metrics.keys():
-             avg_scores[f"avg_{metric_name}"] = 0.0
-
+) -> None:
+    """ Saves JSON, prints verbose output, and returns results."""
+    
     final_metrics_data = {
-        'overall_accuracy_percent': accuracy,
-        'total_completions_processed': num_total_chains_processed,
-        'total_correct_completions': total_correct,
-        'average_metrics': avg_scores
+        'average_metrics_per_example': avg_scores
     }
     
     metrics_path = os.path.join(json_dir, f'eval_metrics_{round_num}.json')
-    try:
-        with open(metrics_path, 'w') as f:
-            json.dump(final_metrics_data, f, indent=4, default=str) 
-        print(f"Evaluation metrics saved to: {metrics_path}")
-    except Exception as e:
-        print(f"Error saving metrics JSON: {e}")
+    with open(metrics_path, 'w') as f:
+        json.dump(final_metrics_data, f, indent=4, default=str) 
 
     if verbose:
         print("\n--- Evaluation Results ---")
-        print(f"Overall Accuracy: {accuracy:.2f}% ({total_correct}/{num_total_chains_processed})")
-        print(f"Total Completions Processed: {num_total_chains_processed}")
-        print("\nAverage Metrics per Completion/Example:")
         for avg_metric_name, value in avg_scores.items():
-            clean_name = avg_metric_name.replace('avg_', '').replace('num_', '').capitalize()
-            print(f"- {clean_name:<25}: {value:.4f}") 
+            clean_name = avg_metric_name.replace('avg_', '').replace('metrics/', '').replace('rewards/', '').replace('_reward_func','').replace('_', ' ').capitalize()
+            print(f"- {clean_name:<30}: {value:.4f}") 
         print("-" * 30) 
 
-    return avg_scores, accuracy
-
-
-################################
-## Data downoals/vision stuff ##
-################################    
-
-# Function removed as we are switching to torchvision's Flowers102 dataset
-# def download_flower_ds(): 
-#     import shutil
-#     import kagglehub
-#     local_dir = "data/flowers"
-#     # Check if data directory already exists
-#     if os.path.exists(local_dir) and os.path.isdir(local_dir) and os.listdir(local_dir):
-#         print(f"Dataset already exists at: {local_dir}")
-#         return
-#     
-#     # Download latest version
-#     path = kagglehub.dataset_download("imsparsh/flowers-dataset")
-#     print("Path to dataset files:", path)
-#     
-#     # Create directory if it doesn't exist
-#     os.makedirs(local_dir, exist_ok=True)
-#     
-#     # Copy the dataset
-#     shutil.copytree(path, local_dir)
-#     print(f"Dataset copied to: {local_dir}")
 
 
 
-if __name__ == "__main__":
-    # download_flower_ds()
-    pass

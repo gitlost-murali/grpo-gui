@@ -175,63 +175,84 @@ def plot_metrics(output_dir):
             # Use round numbers as steps for evaluation plots
             eval_steps = sorted(eval_logs.keys()) 
             
-            # Plot accuracy (if available)
-            if all('overall_accuracy_percent' in eval_logs[step] for step in eval_steps):
-                plt.figure(figsize=(12,7))
-                # Use the correct key, already stored as percentage
-                accuracy_values = [eval_logs[step]['overall_accuracy_percent'] for step in eval_steps] 
-                plt.plot(eval_steps, accuracy_values, color='#2ecc71', linewidth=2.0, marker='o', label='Accuracy')
-                plt.xlabel('Evaluation Round', fontsize=12) # Changed label
-                plt.ylabel('Accuracy (%)', fontsize=12)
-                plt.title('Evaluation Accuracy', fontsize=14, pad=20)
-                plt.grid(True, alpha=0.3)
-                plt.xticks(eval_steps) # Ensure ticks match evaluation rounds
-                plt.legend()
-                pdf.savefig(bbox_inches='tight')
-                plt.close()
+            # Remove the dedicated accuracy plot section as it should be handled below if present in average_metrics
+            # if all('overall_accuracy_percent' in eval_logs[step] for step in eval_steps):
+            #     plt.figure(figsize=(12,7))
+            #     # Use the correct key, already stored as percentage
+            #     accuracy_values = [eval_logs[step]['overall_accuracy_percent'] for step in eval_steps] 
+            #     plt.plot(eval_steps, accuracy_values, color='#2ecc71', linewidth=2.0, marker='o', label='Accuracy')
+            #     plt.xlabel('Evaluation Round', fontsize=12) # Changed label
+            #     plt.ylabel('Accuracy (%)', fontsize=12)
+            #     plt.title('Evaluation Accuracy', fontsize=14, pad=20)
+            #     plt.grid(True, alpha=0.3)
+            #     plt.xticks(eval_steps) # Ensure ticks match evaluation rounds
+            #     plt.legend()
+            #     pdf.savefig(bbox_inches='tight')
+            #     plt.close()
+            # else:
+            #     print("Warning: 'overall_accuracy_percent' key missing in some evaluation logs. Skipping accuracy plot.")
+
+            # Plot all evaluation metrics found in 'average_metrics'
+            if not eval_steps:
+                 print("Warning: No evaluation rounds found.")
             else:
-                print("Warning: 'overall_accuracy_percent' key missing in some evaluation logs. Skipping accuracy plot.")
-
-            # Plot evaluation reward metrics (if available)
-            # Get metric names from the first evaluation log's 'average_metrics' dict
-            first_eval_step = eval_steps[0]
-            if 'average_metrics' in eval_logs[first_eval_step] and isinstance(eval_logs[first_eval_step]['average_metrics'], dict):
-                eval_metric_keys = list(eval_logs[first_eval_step]['average_metrics'].keys())
-                print(f"Plotting evaluation reward metrics: {eval_metric_keys}")
-                
-                metric_color_map = {metric: color for metric, color in zip(eval_metric_keys, colors)} # Use defined colors
-
-                for metric in eval_metric_keys:
-                    color = metric_color_map.get(metric, '#34495e') # Default color
-                    plt.figure(figsize=(12,7))
+                 first_eval_step = eval_steps[0] # Get the first round to check for keys
+                 # Check if the first log has the correct key and it's a dictionary
+                 expected_key = 'average_metrics_per_example' # Use the correct key
+                 if expected_key in eval_logs[first_eval_step] and isinstance(eval_logs[first_eval_step][expected_key], dict):
+                    # Get all metric keys from the first round's dictionary
+                    eval_metric_keys = list(eval_logs[first_eval_step][expected_key].keys())
+                    print(f"Found evaluation metrics in '{expected_key}': {eval_metric_keys}")
                     
-                    # Access metrics within the correct nested dictionary
-                    metric_values = []
-                    valid_eval_steps = []
-                    for step in eval_steps:
-                        if 'average_metrics' in eval_logs[step] and metric in eval_logs[step]['average_metrics']:
-                            metric_values.append(eval_logs[step]['average_metrics'][metric])
-                            valid_eval_steps.append(step)
-                        else:
-                            print(f"Warning: Metric '{metric}' not found in average_metrics for round {step}. Skipping point.")
-                    
-                    if not valid_eval_steps:
-                        print(f"Warning: No data found for evaluation metric '{metric}'. Skipping plot.")
+                    # Assign colors to each metric
+                    metric_color_map = {metric: color for metric, color in zip(eval_metric_keys, colors)} 
+
+                    for metric in eval_metric_keys:
+                        color = metric_color_map.get(metric, '#34495e') # Default color if not enough colors
+                        plt.figure(figsize=(12,7))
+                        
+                        # Extract metric values for all rounds, checking existence under the correct key
+                        metric_values = []
+                        valid_eval_steps = []
+                        for step in eval_steps:
+                            # Check if the key exists in this specific round's log and is a dict
+                            if expected_key in eval_logs[step] and isinstance(eval_logs[step][expected_key], dict) and metric in eval_logs[step][expected_key]:
+                                metric_values.append(eval_logs[step][expected_key][metric])
+                                valid_eval_steps.append(step)
+                            else:
+                                print(f"Warning: Metric '{metric}' not found in {expected_key} for round {step}. Skipping point.")
+                        
+                        if not valid_eval_steps:
+                            print(f"Warning: No data found for evaluation metric '{metric}'. Skipping plot.")
+                            plt.close()
+                            continue
+
+                        # Generate title from metric key
+                        plot_title = metric.replace("_", " ").replace("/", " - ").title() 
+                        plt.plot(valid_eval_steps, metric_values, color=color, linewidth=2.0, marker='o', label=plot_title)
+                        plt.xlabel('Evaluation Round', fontsize=12) 
+                        plt.ylabel(plot_title, fontsize=12)
+                        plt.title(f'Evaluation: {plot_title}', fontsize=14, pad=20)
+                        plt.grid(True, alpha=0.3)
+                        plt.xticks(valid_eval_steps) # Ensure ticks match evaluation rounds where data exists
+                        plt.legend()
+                        pdf.savefig(bbox_inches='tight')
+
+                        # --- Save specific plots as PNG ---
+                        print(plot_title)
+                        if plot_title == "Avg Reward":
+                             png_path = os.path.join(output_dir, "evaluation_avg_reward.png")
+                             plt.savefig(png_path, bbox_inches='tight')
+                             print(f"Saved specific plot: {png_path}")
+                        elif plot_title == "Avg Metrics - Mean Abs Error Minutes":
+                             png_path = os.path.join(output_dir, "evaluation_mean_abs_error_minutes.png")
+                             plt.savefig(png_path, bbox_inches='tight')
+                             print(f"Saved specific plot: {png_path}")
+                        # --- End save specific plots ---
+
                         plt.close()
-                        continue
-
-                    plot_title = metric.split("/")[-1].replace("_", " ").title()
-                    plt.plot(valid_eval_steps, metric_values, color=color, linewidth=2.0, marker='o', label=plot_title)
-                    plt.xlabel('Evaluation Round', fontsize=12) # Changed label
-                    plt.ylabel(plot_title, fontsize=12)
-                    plt.title(f'Evaluation: {plot_title}', fontsize=14, pad=20)
-                    plt.grid(True, alpha=0.3)
-                    plt.xticks(valid_eval_steps) # Ensure ticks match evaluation rounds where data exists
-                    plt.legend()
-                    pdf.savefig(bbox_inches='tight')
-                    plt.close()
-            else:
-                print("Warning: 'average_metrics' key missing or not a dictionary in first evaluation log. Skipping evaluation reward plots.")
+                 else:
+                    print(f"Warning: '{expected_key}' key missing or not a dictionary in first evaluation log (round {first_eval_step}). Skipping evaluation metric plots.")
         else:
              print("No evaluation logs found or processed. Skipping evaluation plots.")
 

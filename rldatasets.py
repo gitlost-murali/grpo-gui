@@ -1,17 +1,12 @@
 """
-Hold all data sets 
-
+Data loader for generating analog clock images and times.
 """
 
 import random
-import numpy as np
-from tqdm import tqdm
+import os
 from typing import Tuple, Any
 from abc import ABC, abstractmethod
-from datasets import load_dataset, Dataset
-from flower_dataset import build_flower_dataloaders
-
-
+from clock_generator import TimeObj, ClockGen
 
 
 class DataLoader(ABC):
@@ -46,155 +41,122 @@ class DataLoader(ABC):
         """Return the next item(s) in the dataset."""
         pass
 
-
-def extract_hash_answer(text: str) -> str | None:
-    if "####" not in text:
-        return None
-    return text.split("####")[1].strip()
-
+    @abstractmethod
+    def reset(self):
+        """Reset the iterator to the beginning."""
+        pass
 
 
-SYSTEM_PROMPT = """
-Respond in the following format:
+# Define the prompt for the Clock dataset
+CLOCK_PROMPT = f"""
+You will be shown an image of an analog clock. Your task is to determine the time shown.
+
+You must answer in the following format exactly:
 <reasoning>
-...
+Reason about the positions of the hour, minute, and second hands to determine the time.
 </reasoning>
 <answer>
-...
+[HH:MM:SS]
 </answer>
+Replace HH, MM, and SS with the two-digit hour (01-12), minute (00-59), and second (00-59).
+Do not include any other text in your answer, or any other text after </answer>.
+
+What time is shown on this clock?
 """
 
 
-
-class GSM8KLoader(DataLoader):
+class ClockDataLoader(DataLoader):
     """
-    A loader class that provides iteration over GSM8K math problems.
+    A data loader that generates random analog clock images and their corresponding times.
     
-    This class implements both sequential and random access to math problems through
-    standard Python iterator protocols. It can be used to iterate over problems either
-    in order or randomly, making it suitable for both training and evaluation.
+    For training, it generates infinitely. For testing, it generates a fixed number.
     
     Attributes:
-        questions (List[str]): List of math question strings
-        answers (List[str]): List of corresponding answer strings
-        random (bool): If True, returns problems randomly; if False, returns sequentially
-        current_index (int): Current position in the lists for sequential access
+        dataset_size (int): The nominal size of the dataset (used for testing length).
+        is_train (bool): Flag indicating if this is a training loader.
+        prompt (str): The instruction prompt for the language model.
+        temp_image_path (str): Path where the temporary clock image is saved.
     """
     
-    def __init__(self, questions: list[str], answers: list[str], random: bool = False) -> None:
-        super().__init__(random)
-        self.questions = questions
-        self.answers = answers
-        self.pre_prompt = """You will be given a question that involves reasoning. You should reason carefully about the question, then provide your answer.
-            It is very important that you put your reasoning process inside <reasoning> tags and your final answer inside <answer> tags, like this:
-
-            
-            <reasoning>
-            Your step-by-step reasoning process here
-            </reasoning>
-            <answer>
-            Your final answer here
-            </answer>
-
-            All of your returned text should either be in the <reasoning> or <answer> tags - no text outside! Start each answer by immediately starting with <reasoning>. 
-            It is is extremely important you answer in this way - do not put any information or text outside of these tags!
-
-            Question: """
-        self.system_prompt = SYSTEM_PROMPT
+    def __init__(self, dataset_size: int = 50, is_train: bool = True) -> None:
+        super().__init__(random=True) # Always generates random times
+        self.dataset_size = dataset_size
+        self.is_train = is_train
+        self.prompt = CLOCK_PROMPT
+        self.temp_image_path = "temp_clock.png" # Fixed path for the temporary image
         
     def __len__(self) -> int:
-        return len(self.questions)
+        # Return the specified size, mainly relevant for the test set iteration count
+        return self.dataset_size
         
-    def __iter__(self) -> 'GSM8KLoader':
+    def __iter__(self) -> 'ClockDataLoader':
+        self.current_index = 0
         return self
         
-    def __next__(self) -> tuple[str, str]:
-        if self.current_index >= len(self.questions):
+    def __next__(self) -> Tuple[str, str]:
+        # Stop iteration for the test set after reaching dataset_size
+        if not self.is_train and self.current_index >= self.dataset_size:
             raise StopIteration
         
-        if self.random:
-            idx = random.randint(0, len(self.questions) - 1)
-        else:
-            idx = self.current_index
-            self.current_index += 1
+        self.current_index += 1
+        
+        # Generate a random time
+        time_obj = TimeObj()
+        
+        # Generate the clock image
+        clock_gen = ClockGen(time_obj)
+        clock_gen.generate_clock(filename=self.temp_image_path)
+
+        # Get the time string in [HH:MM:SS] format
+        time_string = str(time_obj)
             
-        return self.questions[idx], self.answers[idx]
+        return self.temp_image_path, time_string
 
     def reset(self):
         self.current_index = 0 
 
 
-
-
-
-
-def build_gsm8k_dataloaders() -> Tuple[GSM8KLoader, GSM8KLoader]: 
-    data = load_dataset('openai/gsm8k', 'main')["train"]
-
-    questions = []
-    parsed_answers = [] 
-    for i in tqdm(range(len(data)), desc="Processing"):
-        # Try to get answer - if is None dont use this sample 
-        ans = extract_hash_answer(data[i]['answer'])
-        if ans is None: 
-            continue 
-        else:
-            questions.append(data[i]['question'])
-            parsed_answers.append(ans)
-
-    # Randomly split into train/test sets
-    total_samples = len(questions)
-    test_size = int(total_samples * 0.01)  # 10% for test set
-    
-    # Generate random indices for test set
-    test_indices = random.sample(range(total_samples), test_size)
-    test_indices_set = set(test_indices)
-    
-    # Convert to numpy arrays for easier indexing
-    questions = np.array(questions)
-    parsed_answers = np.array(parsed_answers)
-    
-    # Create boolean mask for test indices
-    test_mask = np.zeros(total_samples, dtype=bool)
-    test_mask[list(test_indices_set)] = True
-    
-    # Split using boolean indexing
-    test_questions = questions[test_mask]
-    test_answers = parsed_answers[test_mask]
-    train_questions = questions[~test_mask] 
-    train_answers = parsed_answers[~test_mask]
-
-    # Setup data loaders 
-    trainloader = GSM8KLoader(train_questions.tolist(), train_answers.tolist())
-    testloader = GSM8KLoader(test_questions.tolist(), test_answers.tolist())
-    
-    return trainloader, testloader
-
-
-
-
-
-def get_dataloaders(dataset_name: str) -> Tuple[DataLoader, DataLoader]:
+def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader]:
     """
     Factory function to get train and test data loaders for a specified dataset.
     
     Args:
-        dataset_name (str): Name of the dataset to load ('gsm8k' or 'flowers' currently supported)
-        
+        dataset_name (str): Name of the dataset to load ('clock' currently supported).
+        **kwargs: Additional arguments for specific data loaders (e.g., dataset_size).
+
     Returns:
         Tuple[DataLoader, DataLoader]: Train and test data loaders
         
     Raises:
-        ValueError: If dataset_name is not supported
+        ValueError: If dataset_name is not supported.
     """
-    if dataset_name.lower() == 'gsm8k':
-        return build_gsm8k_dataloaders()
-    elif dataset_name.lower() == 'flowers':
-        train_rl_loader, test_rl_loader, _, _ = build_flower_dataloaders()
-        return train_rl_loader, test_rl_loader
+    dataset_size = kwargs.get('dataset_size', 50) # Default size for test set
+
+    if dataset_name.lower() == 'clock':
+        # Training loader generates infinitely (conceptually), test loader has fixed size
+        trainloader = ClockDataLoader(dataset_size=dataset_size * 100, is_train=True) # Large nominal size for train
+        testloader = ClockDataLoader(dataset_size=dataset_size, is_train=False)
+        return trainloader, testloader
     else:
-        raise ValueError(f"Dataset '{dataset_name}' not supported. Available datasets: 'gsm8k', 'flowers'")
+        raise ValueError(f"Dataset '{dataset_name}' not supported. Currently supported: 'clock'")
 
 
 if __name__ == "__main__": 
-    trainloader, testloader = get_dataloaders('gsm8k')
+    train_loader, test_loader = get_dataloaders('clock', dataset_size=5) # Use smaller size for testing
+    print(f"Train loader prompt: {train_loader.prompt}")
+    print(f"Test loader length: {len(test_loader)}")
+
+    print("\n--- Training Loader Samples (first 2) ---")
+    count = 0
+    for img_path, time_str in train_loader:
+        print(f" Image Path: {img_path}, Time: {time_str}")
+        count += 1
+        if count >= 2:
+            break
+
+    print("\n--- Test Loader Samples (all) ---")
+    test_loader.reset()
+    for img_path, time_str in test_loader:
+        print(f" Image Path: {img_path}, Time: {time_str}")
+    
+    print("\nTest loader iteration finished.")

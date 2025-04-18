@@ -45,6 +45,9 @@ def eval_on_test_set(
     
     test_loader.reset()
 
+    # Determine the correct error metric key based on dataset type
+    error_metric_key = 'metrics/mean_abs_correlation_error' if args.dataset_type == 'correlation' else 'metrics/mean_abs_error_seconds'
+
     # --- Evaluation Loop ---
     for batch in tqdm(test_loader, desc="Evaluating on test set"):
         img_path, answer = batch
@@ -74,9 +77,10 @@ def eval_on_test_set(
                     elif torch.is_tensor(value) and value.numel() == 1:
                          aggregated_metrics[metric_name] += value.item()
             
-            example_total_errors += metrics_single["metrics/mean_abs_error_seconds"]
+            example_total_errors += metrics_single[error_metric_key]
             num_total_chains_processed += 1
         num_examples += 1
+
 
 
     # Take average of all errors
@@ -89,7 +93,8 @@ def eval_on_test_set(
     # build pdf
     doc.build(story)
 
-    # log final metrics
+    # log final average metrics
+    # Assuming _calculate_and_log_final_metrics logs averages, pass avg_scores
     utils._calculate_and_log_final_metrics(avg_scores, json_dir, round_num, args.verbose)
 
     return avg_error, avg_scores
@@ -416,13 +421,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="GRPO training arguments")
     
     # Model configuration
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen-VL-Chat", help="Name/path of base model")
-    parser.add_argument("--dataset_name", type=str, default="clock", help="Dataset to use for training")
+    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct", help="Model identifier for main and base model")
+    parser.add_argument("--dataset_type", type=str, default="clock", choices=["clock", "correlation"], help="Type of dataset to use ('clock' or 'correlation')")
 
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
-    parser.add_argument("--save_steps", type=int, default=500, help="Save a resumable checkpoint every N steps")
+    parser.add_argument("--save_steps", type=int, default=3000, help="Save a resumable checkpoint every N steps")
     parser.add_argument("--eval_iterations", type=int, default=100, help="Number of iterations for evaluation")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to a checkpoint file to resume training from.")
 
@@ -458,6 +463,7 @@ if __name__ == "__main__":
 
     # Get all args 
     args = parse_args() 
+
     
     # Seed everything 
     utils.seed_everything(args.seed)
@@ -472,14 +478,16 @@ if __name__ == "__main__":
     ###############################
 
     ## Set which model to train 
-    model, tokenizer = llms.get_llm_tokenizer(args.model_name, device)
-    base_model, _ = llms.get_llm_tokenizer(args.model_name, device)
+    model, tokenizer = llms.get_llm_tokenizer(args.model_name_or_path, device)
+    base_model, _ = llms.get_llm_tokenizer(args.model_name_or_path, device)
 
     ## Set which data set 
-    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name)
+    print(f"Loading dataset: {args.dataset_type}")
+    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_type)
 
     ## Set which evaluation criteria to use 
-    eval_class = evaluator.get_evaluator(args.dataset_name)
+    print(f"Loading evaluator for: {args.dataset_type}")
+    eval_class = evaluator.get_evaluator(args.dataset_type)
 
     ###############################
 
@@ -576,6 +584,7 @@ if __name__ == "__main__":
                     'accuracy': eval_accuracy
                 }, f, indent=4)
 
+
         # Slowly update ref model
         if args.update_ref_model and (round_num+1) % args.update_ref_model_freq == 0:
             with torch.no_grad():
@@ -600,7 +609,7 @@ if __name__ == "__main__":
         scheduler.step() 
 
         # Step optimizer
-        if (round_num + 1) % args.gradient_accumulation_steps == 0:
+        if True:#(round_num + 1) % args.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             optimizer.step()
             optimizer.zero_grad()    

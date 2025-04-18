@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.style as style
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.ticker import MaxNLocator
 
 def moving_average(data, window_size=5):
     """Calculate moving average with given window size"""
@@ -234,7 +235,9 @@ def plot_metrics(output_dir):
                         plt.ylabel(plot_title, fontsize=12)
                         plt.title(f'Evaluation: {plot_title}', fontsize=14, pad=20)
                         plt.grid(True, alpha=0.3)
-                        plt.xticks(valid_eval_steps) # Ensure ticks match evaluation rounds where data exists
+                        # Use MaxNLocator to reduce the number of x-axis ticks
+                        ax = plt.gca() # Get current axes
+                        ax.xaxis.set_major_locator(MaxNLocator(nbins=10, integer=True)) 
                         plt.legend()
                         pdf.savefig(bbox_inches='tight')
 
@@ -244,8 +247,8 @@ def plot_metrics(output_dir):
                              png_path = os.path.join(output_dir, "evaluation_avg_reward.png")
                              plt.savefig(png_path, bbox_inches='tight')
                              print(f"Saved specific plot: {png_path}")
-                        elif plot_title == "Avg Metrics - Mean Abs Error Minutes":
-                             png_path = os.path.join(output_dir, "evaluation_mean_abs_error_minutes.png")
+                        elif plot_title == "Avg Metrics - Mean Abs Correlation Error":
+                             png_path = os.path.join(output_dir, "evaluation_mean_abs_correlation_error.png")
                              plt.savefig(png_path, bbox_inches='tight')
                              print(f"Saved specific plot: {png_path}")
                         # --- End save specific plots ---

@@ -7,6 +7,7 @@ import os
 from typing import Tuple, Any
 from abc import ABC, abstractmethod
 from clock_generator import TimeObj, ClockGen
+from correlation_generator import generate_correlation_plot # Import the correlation generator
 
 
 class DataLoader(ABC):
@@ -116,12 +117,90 @@ class ClockDataLoader(DataLoader):
         self.current_index = 0 
 
 
+# --- Correlation Scatter Dataset (using temp file) --- 
+
+CORRELATION_PROMPT = f"""
+You will be shown a scatter plot image displaying a relationship between two variables.
+Your task is to estimate the Pearson correlation coefficient (R) depicted in the plot.
+The correlation R is a value between 0.00 and 1.00, where 0.00 indicates no correlation and 1.00 indicates perfect positive correlation.
+
+You must answer in the following format exactly:
+<reasoning>
+Analyze the scatter plot. Consider how closely the points follow a linear pattern. A tighter cluster along a line indicates a higher correlation.
+</reasoning>
+<answer>
+X.XX
+</answer>
+Replace X.XX with your estimated correlation coefficient, formatted to two decimal places (e.g., 0.75, 0.00, 1.00).
+Do not include any other text in your answer, or any other text after </answer>.
+
+What is the estimated correlation R shown in this scatter plot?
+"""
+
+class CorrelationScatterDataLoader(DataLoader):
+    """
+    A data loader that generates random correlation scatter plot images and their corresponding R-values,
+    saving the image to a temporary file.
+    
+    Attributes:
+        dataset_size (int): The nominal size of the dataset (used for testing length).
+        is_train (bool): Flag indicating if this is a training loader.
+        prompt (str): The instruction prompt for the language model.
+        temp_image_path (str): Path where the temporary correlation image is saved.
+        num_points (int): Number of points for the scatter plot.
+        image_size (tuple): Size of the generated image.
+    """
+    
+    def __init__(self, dataset_size: int = 50, is_train: bool = True) -> None:
+        super().__init__(random=True) # Always generates random correlations
+        self.dataset_size = dataset_size
+        self.is_train = is_train
+        self.prompt = CORRELATION_PROMPT
+        self.temp_image_path = "temp_correlation.png" # Fixed path for the temporary image
+        self.num_points = 75 # Standard number of points for correlation plots
+        self.image_size = (224, 224) # Standard size
+        
+    def __len__(self) -> int:
+        return self.dataset_size
+        
+    def __iter__(self) -> 'CorrelationScatterDataLoader':
+        self.current_index = 0
+        return self
+        
+    def __next__(self) -> Tuple[str, str]: # Returns path and label string
+        if not self.is_train and self.current_index >= self.dataset_size:
+            raise StopIteration
+            
+        self.current_index += 1
+        
+        # Generate a random R value between 0.00 and 1.00
+        r_value = random.uniform(0.0, 1.0)
+        
+        # Generate the scatter plot image and save it to the temp path
+        generate_correlation_plot(
+            r_value=r_value,
+            num_points=self.num_points,
+            filename=self.temp_image_path, # Save to temp path
+            img_size=self.image_size,
+        )
+
+        # Format the R value string to X.XX
+        r_string = f"{r_value:.2f}"
+            
+        return self.temp_image_path, r_string # Return path and label
+
+    def reset(self):
+        self.current_index = 0
+
+
+# --- Factory Function --- 
+
 def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader]:
     """
     Factory function to get train and test data loaders for a specified dataset.
     
     Args:
-        dataset_name (str): Name of the dataset to load ('clock' currently supported).
+        dataset_name (str): Name of the dataset ('clock' or 'correlation').
         **kwargs: Additional arguments for specific data loaders (e.g., dataset_size).
 
     Returns:
@@ -131,32 +210,56 @@ def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader
         ValueError: If dataset_name is not supported.
     """
     dataset_size = kwargs.get('dataset_size', 50) # Default size for test set
+    dataset_name = dataset_name.lower() # Normalize name
 
-    if dataset_name.lower() == 'clock':
+    if dataset_name == 'clock':
         # Training loader generates infinitely (conceptually), test loader has fixed size
         trainloader = ClockDataLoader(dataset_size=dataset_size * 100, is_train=True) # Large nominal size for train
         testloader = ClockDataLoader(dataset_size=dataset_size, is_train=False)
         return trainloader, testloader
+    elif dataset_name == 'correlation':
+        trainloader = CorrelationScatterDataLoader(dataset_size=dataset_size * 100, is_train=True)
+        testloader = CorrelationScatterDataLoader(dataset_size=dataset_size, is_train=False)
+        return trainloader, testloader
     else:
-        raise ValueError(f"Dataset '{dataset_name}' not supported. Currently supported: 'clock'")
+        raise ValueError(f"Dataset '{dataset_name}' not supported. Supported: 'clock', 'correlation'")
 
 
 if __name__ == "__main__": 
-    train_loader, test_loader = get_dataloaders('clock', dataset_size=5) # Use smaller size for testing
-    print(f"Train loader prompt: {train_loader.prompt}")
-    print(f"Test loader length: {len(test_loader)}")
+    # Test Clock Loader
+    print("--- Testing Clock Loader ---")
+    try:
+        train_loader_c, test_loader_c = get_dataloaders('clock', dataset_size=2)
+        print(f"Clock Train loader prompt: {train_loader_c.prompt[:80]}...")
+        print(f"Clock Test loader length: {len(test_loader_c)}")
 
-    print("\n--- Training Loader Samples (first 2) ---")
-    count = 0
-    for img_path, time_str in train_loader:
-        print(f" Image Path: {img_path}, Time: {time_str}")
-        count += 1
-        if count >= 2:
-            break
+        print("  Train Sample:")
+        img_path_c, label_c = next(train_loader_c)
+        print(f"    Image Path: {img_path_c}, Label: {label_c}")
 
-    print("\n--- Test Loader Samples (all) ---")
-    test_loader.reset()
-    for img_path, time_str in test_loader:
-        print(f" Image Path: {img_path}, Time: {time_str}")
-    
-    print("\nTest loader iteration finished.")
+        print("  Test Samples:")
+        test_loader_c.reset()
+        for img_path_c, label_c in test_loader_c:
+            print(f"    Image Path: {img_path_c}, Label: {label_c}")
+        print("  Clock Test loader iteration finished.")
+    except Exception as e:
+        print(f"Error testing clock loader: {e}")
+
+    # Test Correlation Loader
+    print("\n--- Testing Correlation Loader ---")
+    try:
+        train_loader_r, test_loader_r = get_dataloaders('correlation', dataset_size=2)
+        print(f"Correlation Train loader prompt: {train_loader_r.prompt[:80]}...")
+        print(f"Correlation Test loader length: {len(test_loader_r)}")
+
+        print("  Train Sample:")
+        img_path_r, label_r = next(train_loader_r)
+        print(f"    Image Path: {img_path_r}, Label: {label_r}")
+
+        print("  Test Samples:")
+        test_loader_r.reset()
+        for img_path_r, label_r in test_loader_r:
+            print(f"    Image Path: {img_path_r}, Label: {label_r}")
+        print("  Correlation Test loader iteration finished.")
+    except Exception as e:
+        print(f"Error testing correlation loader: {e}")

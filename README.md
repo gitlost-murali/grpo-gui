@@ -98,6 +98,51 @@ To replicate or experiment with the clock reading task:
 
 4.  **Monitor Results:** Training logs (`train_logs.json`) and evaluation metrics/plots (`eval_logs/`) will be saved in the specified `output_dir`. The `plotter.py` script can be used to visualize the results (`python plotter.py --output_dir ./clock_experiment_output`).
 
+## Correlation Task: Learning Numerical Relationships
+
+Building on the idea of teaching the model visual-spatial reasoning, another experiment involved training the model to estimate the Pearson correlation coefficient directly from a scatter plot image.
+
+### The Task
+1.  **Image Generation:** Generate scatter plots with varying degrees of linear correlation (positive and negative).
+    An example input plot might look like this, where the underlying correlation is 0.7:
+    ![Example Correlation Plot](plots/temp_correlation.png)
+2.  **Model Input:** The VLM receives the scatter plot image and a prompt asking for the correlation coefficient.
+3.  **Model Output:** The model is expected to output the predicted correlation value (a float between -1.0 and 1.0).
+4.  **Reward Calculation:** The reward is based on the absolute difference between the model's predicted correlation and the ground truth correlation used to generate the plot. Smaller differences result in higher rewards.
+
+### Results on Correlation Estimation
+Training showed promising results, with the model learning to better estimate the correlation from the visual data.
+- **Mean Absolute Error:** The plot below illustrates the reduction in the average absolute error of the model's correlation predictions during training. The error decreased from approximately 0.225 initially down to around 0.07.
+    ![Evaluation Mean Absolute Correlation Error](plots/correlation.png)
+
+This demonstrates the model's ability to learn numerical relationships presented visually.
+
+### Running the Correlation Experiment
+
+1.  **Dataset:** Similar to the clock task, correlation plots are generated on-the-fly by `correlation_generator.py` as configured in `rldatasets.py` (`CorrelationDataset`).
+2.  **Configuration:** In `main.py` or via command-line:
+    *   Set `--model_path` to the VLM (e.g., `Qwen/Qwen-VL-Chat`).
+    *   Set `--dataset_name` to `"correlation"`.
+    *   Set `--output_dir`.
+3.  **Run Training:**
+    ```bash
+    python main.py \\
+        --model_path Qwen/Qwen-VL-Chat \\
+        --dataset_name correlation \\
+        --output_dir ./correlation_experiment_output \\
+        --num_train_epochs 5 \\
+        --eval_steps 50
+        # Add other relevant arguments
+    ```
+4.  **Monitor Results:** Use `plotter.py` on the `output_dir`.
+
+## Next Steps
+
+Future work aims to explore more complex interactions and reasoning:
+
+1.  **Tool Use Integration:** Allow the model to utilize tools based on its predictions. For instance, after predicting a time from a clock or a correlation from a plot, the model could use a tool to generate a visual representation (a new clock face or plot) based on its prediction. It could then compare this generated image to the original input and refine its initial prediction based on the visual feedback.
+2.  **Generative Multi-Turn Visual Environments:** Explore generating entire scenes or sequences of visual puzzles. This could involve creating scenarios where the model needs to solve multiple related visual tasks across several turns, potentially using tools to manipulate or query parts of the visual environment. The goal is to develop verifiable, programmatically generated environments for more complex multi-turn visual reasoning and tool use.
+
 ## Citation
 If you find this repository useful, please consider citing:
 ```bibtex

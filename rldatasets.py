@@ -4,10 +4,11 @@ Data loader for generating analog clock images and times.
 
 import random
 import os
-from typing import Tuple, Any
+from typing import Tuple, Any, Dict
 from abc import ABC, abstractmethod
 from clock_generator import TimeObj, ClockGen
 from correlation_generator import generate_correlation_plot # Import the correlation generator
+from gui_generator import GUIGenerator # Import the new GUI generator
 
 
 class DataLoader(ABC):
@@ -193,6 +194,110 @@ class CorrelationScatterDataLoader(DataLoader):
         self.current_index = 0
 
 
+# --- GUI Interaction Dataset --- 
+
+# Dynamic prompt, base template here. {target_object_name} will be replaced.
+GUI_PROMPT_TEMPLATE = """
+You will be shown an image of a graphical user interface (GUI).
+The image is 224x224 pixels.
+Your task is to identify and provide the coordinates to click the target object: '{target_object_name}'.
+
+You must answer in the following format exactly:
+<reasoning>
+Briefly describe your reasoning for choosing the click location based on the target object's appearance and position.
+</reasoning>
+<answer>
+x,y
+</answer>
+Replace x and y with the integer pixel coordinates (e.g., 123,45) where you would click for the '{target_object_name}'. The coordinates must be within the 0-223 range for both x and y.
+Do not include any other text in your answer, or any other text after </answer>.
+
+Where would you click to interact with the '{target_object_name}'?
+"""
+
+class GUIDataLoader(DataLoader):
+    """
+    A data loader that generates GUI scenes, selects a target object, and provides a prompt to click it.
+    
+    Attributes:
+        dataset_size (int): Nominal size (for testing).
+        is_train (bool): Training or testing mode.
+        gui_generator (GUIGenerator): Instance of the GUI scene generator.
+        temp_image_path (str): Path for the temporary GUI image.
+        prompt_template (str): Base prompt string with placeholder for target object name.
+        # `self.prompt` will be dynamically set in __next__ for this loader
+    """
+    def __init__(self, dataset_size: int = 50, is_train: bool = True, 
+                 image_width: int = 224, image_height: int = 224, 
+                 hard_mode_prob: float = 0.1):
+        super().__init__(random=True)
+        self.dataset_size = dataset_size
+        self.is_train = is_train
+        self.gui_generator = GUIGenerator(width=image_width, height=image_height)
+        self.temp_image_path = "temp_gui_scene.png"
+        self.prompt_template = GUI_PROMPT_TEMPLATE
+        self.prompt = "" 
+        self.hard_mode_prob = hard_mode_prob
+
+    def __len__(self) -> int:
+        return self.dataset_size
+
+    def __iter__(self) -> 'GUIDataLoader':
+        self.current_index = 0
+        return self
+
+    def __next__(self) -> Tuple[str, Dict[str, Any]]:
+        """
+        Returns:
+            Tuple[str, Dict[str, Any]]: 
+                - image_path (str): Path to the saved GUI image.
+                - target_info (Dict[str, Any]): Dictionary containing target details:
+                    {'name': str, 'bounding_box': tuple, 'center_x': int, 'center_y': int, 'dynamic_prompt': str, 'is_hard': bool}
+        """
+        if not self.is_train and self.current_index >= self.dataset_size:
+            raise StopIteration
+
+        self.current_index += 1
+        
+        # Determine if this example should be hard mode based on the stored probability
+        use_hard_mode = random.random() < self.hard_mode_prob
+        
+        target_info = None
+        max_retries = 5 
+        for _ in range(max_retries):
+            gui_image, _, temp_target_info = self.gui_generator.generate_scene_with_target(generate_hard_mode=use_hard_mode)
+            if temp_target_info:
+                target_info = temp_target_info
+                break
+        
+        if not target_info:
+            all_elements = json.loads(_)
+            if all_elements and any(el['name'] == 'window' for el in all_elements):
+                target_info = next(el for el in all_elements if el['name'] == 'window')
+            else:
+                raise ValueError("Failed to generate a GUI scene with any identifiable target element after multiple retries.")
+
+        gui_image.save(self.temp_image_path)
+        
+        target_object_name_for_prompt = target_info['name'].replace("_", " ")
+        self.prompt = self.prompt_template.format(target_object_name=target_object_name_for_prompt)
+        
+        # Add the 'is_hard' flag to the answer dictionary
+        answer_for_evaluator = {
+            "name": target_info["name"],
+            "bounding_box": target_info["bounding_box"],
+            "center_x": target_info["center_x"],
+            "center_y": target_info["center_y"],
+            "dynamic_prompt": self.prompt, 
+            "is_hard": use_hard_mode
+        }
+            
+        return self.temp_image_path, answer_for_evaluator
+
+    def reset(self):
+        self.current_index = 0
+
+
 # --- Factory Function --- 
 
 def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader]:
@@ -200,8 +305,8 @@ def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader
     Factory function to get train and test data loaders for a specified dataset.
     
     Args:
-        dataset_name (str): Name of the dataset ('clock' or 'correlation').
-        **kwargs: Additional arguments for specific data loaders (e.g., dataset_size).
+        dataset_name (str): Name of the dataset ('clock' or 'correlation' or 'gui').
+        **kwargs: Additional arguments for specific data loaders (e.g., dataset_size, image_width, image_height).
 
     Returns:
         Tuple[DataLoader, DataLoader]: Train and test data loaders
@@ -209,20 +314,34 @@ def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader
     Raises:
         ValueError: If dataset_name is not supported.
     """
-    dataset_size = kwargs.get('dataset_size', 50) # Default size for test set
-    dataset_name = dataset_name.lower() # Normalize name
+    dataset_size = kwargs.get('dataset_size', 50)
+    image_width = kwargs.get('image_width', 224)
+    image_height = kwargs.get('image_height', 224)
+    # Get hard mode probability from kwargs, default to 0.1 for training
+    hard_mode_prob_train = kwargs.get('hard_mode_prob_train', 0.1)
+    # Default hard mode prob for testing is 0.0 unless specified
+    hard_mode_prob_test = kwargs.get('hard_mode_prob_test', 0.1) # Let's use same prob for test too
+
+    dataset_name = dataset_name.lower()
 
     if dataset_name == 'clock':
-        # Training loader generates infinitely (conceptually), test loader has fixed size
-        trainloader = ClockDataLoader(dataset_size=dataset_size * 100, is_train=True) # Large nominal size for train
+        trainloader = ClockDataLoader(dataset_size=dataset_size * 100, is_train=True)
         testloader = ClockDataLoader(dataset_size=dataset_size, is_train=False)
         return trainloader, testloader
     elif dataset_name == 'correlation':
         trainloader = CorrelationScatterDataLoader(dataset_size=dataset_size * 100, is_train=True)
         testloader = CorrelationScatterDataLoader(dataset_size=dataset_size, is_train=False)
         return trainloader, testloader
+    elif dataset_name == 'gui':
+        trainloader = GUIDataLoader(dataset_size=dataset_size * 100, is_train=True, 
+                                  image_width=image_width, image_height=image_height, 
+                                  hard_mode_prob=hard_mode_prob_train)
+        testloader = GUIDataLoader(dataset_size=dataset_size, is_train=False, 
+                                 image_width=image_width, image_height=image_height, 
+                                 hard_mode_prob=hard_mode_prob_test)
+        return trainloader, testloader
     else:
-        raise ValueError(f"Dataset '{dataset_name}' not supported. Supported: 'clock', 'correlation'")
+        raise ValueError(f"Dataset '{dataset_name}' not supported. Supported: 'clock', 'correlation', 'gui'")
 
 
 if __name__ == "__main__": 
@@ -263,3 +382,44 @@ if __name__ == "__main__":
         print("  Correlation Test loader iteration finished.")
     except Exception as e:
         print(f"Error testing correlation loader: {e}")
+
+    # Test GUI Loader
+    print("\n--- Testing GUI Loader ---")
+    try:
+        gui_train_loader, gui_test_loader = get_dataloaders('gui', dataset_size=2)
+        print(f"GUI Test loader length: {len(gui_test_loader)}")
+
+        print("  Train Sample (GUI):")
+        img_path_gui, target_details_gui = next(gui_train_loader) # Prompt is now part of target_details_gui
+        print(f"    Image Path: {img_path_gui}")
+        print(f"    Target Name: {target_details_gui['name']}")
+        print(f"    Target BBox: {target_details_gui['bounding_box']}")
+        print(f"    Dynamic Prompt Snippet: {target_details_gui['dynamic_prompt'][:150]}...")
+
+        print("  Test Samples (GUI):")
+        gui_test_loader.reset()
+        for i, (img_path_gui, target_details_gui) in enumerate(gui_test_loader):
+            print(f"    Test Sample {i+1}:")
+            print(f"      Image Path: {img_path_gui}")
+            print(f"      Target Name: {target_details_gui['name']}")
+            # print(f"      Target BBox: {target_details_gui['bounding_box']}")
+            print(f"      Dynamic Prompt Snippet: {target_details_gui['dynamic_prompt'][:150]}...")
+            if i == 0: # Plot the first test image with its target for visual check
+                from PIL import Image
+                from gui_generator import GUIGenerator # For plotting
+                example_img = Image.open(img_path_gui)
+                plot_data = [{
+                    "name": "TARGET_" + target_details_gui['name'], 
+                    "bounding_box": target_details_gui['bounding_box'], 
+                    "is_truth": True
+                }]
+                img_with_target_plot = GUIGenerator.plot_predictions(example_img, plot_data, truth_color="blue")
+                target_plot_filename = "rldatasets_gui_test_sample_with_target.png"
+                img_with_target_plot.save(target_plot_filename)
+                print(f"      Saved first test sample with target plotted to: {target_plot_filename}")
+
+        print("  GUI Test loader iteration finished.")
+    except Exception as e:
+        print(f"Error testing GUI loader: {e}")
+        import traceback
+        traceback.print_exc()

@@ -8,15 +8,24 @@ import numpy as np
 import torch.nn.functional as F
 from collections import defaultdict
 from reportlab.lib.units import inch
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as PlatypusImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as PlatypusImage, PageBreak, Table, TableStyle
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.enums import TA_JUSTIFY
+from reportlab.lib import colors
+from PIL import Image as PILImage # To avoid conflict with ReportLabImage
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from qwen_vl_utils import process_vision_info
 
 import evaluator
+from gui_generator import GUIGenerator # For plot_predictions type hint if GUI specific logic
+
+MAX_COMPLETIONS_PER_PAGE_PDF = 2
+MAX_PROMPT_LENGTH_PDF = 300 # Add the missing constant definition
+MAX_ANSWER_LENGTH_PDF = 200
+MAX_COMPLETION_LENGTH_PDF = 500
 
 ####################
 ## MISC FUNCTIONS ##
@@ -42,7 +51,8 @@ def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     
     # Additional settings for reproducibility
     torch.backends.cudnn.deterministic = True
@@ -58,34 +68,8 @@ def write_generation_log(log_data: Dict[str, Any], log_file: str) -> None:
         log_data: Dictionary containing prompt and generation data
         log_file: Path to output log file
     """
-    with open(log_file, 'w') as f:
-        # Write prompt section
-        f.write("###### ORIGINAL PROMPT #####\n\n")
-        f.write(log_data['prompt']['text'] + "\n\n")
-        f.write("#### ANS ####\n\n")
-        f.write(str(log_data['prompt']['answer']) + "\n")
-
-        # Write each generation
-        for i, gen in enumerate(log_data['generations'], 1):
-            f.write(f"#### GENERATION {i} RESPONSE ####\n\n")
-            f.write(gen['response'] + "\n\n")
-            f.write(f"#### GENERATION {i} SCORES ####\n")
-            
-            # Write all available scores dynamically
-            # Check if scores exist and are a dictionary
-            if 'scores' in gen and isinstance(gen['scores'], dict):
-                for score_name, score_value in gen['scores'].items():
-                    # Format score names nicely (optional but good)
-                    formatted_name = score_name.replace('_', ' ').capitalize()
-                    try:
-                        # Attempt to format as float (e.g., total_reward), fallback to string
-                        f.write(f"{formatted_name}: {float(score_value):.4f}\n") 
-                    except (ValueError, TypeError):
-                         f.write(f"{formatted_name}: {score_value}\n") # Fallback for non-numeric scores
-            else:
-                f.write("No scores available for this generation.\n") # Handle case where scores might be missing
-
-            f.write("\n") # Add a newline after scores for better separation
+    with open(log_file, 'a') as f: # Append mode
+        f.write(json.dumps(log_data, indent=2) + "\n---\n") # Add separator
 
 
 ####################################################################################
@@ -221,14 +205,14 @@ def _setup_training_log_directory(output_dir: str) -> str:
     os.makedirs(training_log_dir, exist_ok=True)
     return training_log_dir
 
-def _setup_eval_directories(output_dir: str) -> tuple[str, str, str]:
+def _setup_eval_directories(base_output_dir: str) -> tuple[str, str, str]:
     """Creates and returns paths for evaluation log directories (PDF and JSON)."""
-    eval_logs_dir = os.path.join(output_dir, "eval_logs")
-    pdf_dir = os.path.join(eval_logs_dir, "pdfs")
-    json_dir = os.path.join(eval_logs_dir, "json")
-    for dir_path in [pdf_dir, json_dir]:
-        os.makedirs(dir_path, exist_ok=True)
-    return eval_logs_dir, pdf_dir, json_dir
+    logs_dir = os.path.join(base_output_dir, 'eval_logs')
+    pdf_dir = os.path.join(logs_dir, 'pdfs')
+    json_dir = os.path.join(logs_dir, 'json_reports')
+    os.makedirs(pdf_dir, exist_ok=True)
+    os.makedirs(json_dir, exist_ok=True)
+    return logs_dir, pdf_dir, json_dir
 
 def _setup_pdf(pdf_path: str) -> tuple[SimpleDocTemplate, dict, list]:
     """Initializes the PDF document, styles, and story list."""
@@ -241,138 +225,331 @@ def _setup_pdf(pdf_path: str) -> tuple[SimpleDocTemplate, dict, list]:
     styles.add(ParagraphStyle(name='Justified', parent=styles['Normal'], alignment=TA_JUSTIFY))
     return doc, styles, story
 
-def _add_example_header_to_pdf(
-    story: list, 
-    styles: dict, 
-    img_path: str, 
-    prompt: str, 
-    answer: str, 
-    example_num: int
-):
-    """Adds the image, question, and ground truth for an example to the PDF story."""
-    story.append(Paragraph(f"Evaluation Example #{example_num}", styles['h2']))
-    try:
-        img = PlatypusImage(img_path)
-        img_width = img.imageWidth
-        img_height = img.imageHeight
+def _truncate_text(text: str, max_length: int) -> str:
+    if len(text) > max_length:
+        return text[:max_length-3] + "..."
+    return text
+
+def _add_example_header_to_pdf(story: list, styles: dict, image_path: str, 
+                               prompt_text: str, answer_data: Any, example_num: int, dataset_type: str,
+                               is_hard: bool = False):
+    title = f"Example {example_num + 1}"
+    if is_hard:
+        title += " (Hard Subset)"
+    story.append(Paragraph(title, styles['h2']))
+    
+    # Display image if path is valid
+    if os.path.exists(image_path):
+        try:
+            img = PILImage.open(image_path)
+            img_width, img_height = img.size
+            aspect = img_height / float(img_width)
+            display_width = 2.5 * inch # Max width for the image in PDF
+            display_height = display_width * aspect
+            # Cap height to prevent overly tall images
+            if display_height > 3.5 * inch:
+                display_height = 3.5 * inch
+                display_width = display_height / aspect
+            
+            story.append(PlatypusImage(image_path, width=display_width, height=display_height))
+            story.append(Spacer(1, 0.1*inch))
+        except Exception as e:
+            story.append(Paragraph(f"Error loading image: {image_path}. Error: {e}", styles['BodyText']))
+    else:
+        story.append(Paragraph(f"Image not found: {image_path}", styles['BodyText']))
+
+    # Display full prompt without truncation, escape HTML tags
+    story.append(Paragraph(f"<b>Prompt:</b>", styles['BodyText']))
+    escaped_prompt = html.escape(prompt_text).replace('\n', '<br/>')
+    story.append(Paragraph(escaped_prompt, styles['Code']))
+    
+    # Display answer/target information based on dataset type
+    if dataset_type == 'gui':
+        target_name = answer_data.get('name', 'N/A')
+        target_bbox = answer_data.get('bounding_box', 'N/A')
+        story.append(Paragraph(f"<b>Target Object:</b> {target_name}", styles['BodyText']))
+        story.append(Paragraph(f"<b>Target BBox:</b> {str(target_bbox)}", styles['BodyText']))
+    else: # Clock, Correlation
+        story.append(Paragraph(f"<b>Ground Truth Answer:</b> {_truncate_text(str(answer_data), MAX_ANSWER_LENGTH_PDF)}", styles['BodyText']))
+    story.append(Spacer(1, 0.2*inch))
+
+def _add_completion_to_pdf(story: list, styles: dict, completion_text: str, 
+                           metrics: Optional[Dict[str, Any]], completion_idx: int, 
+                           dataset_type: str,
+                           image_path_for_completion_pdf: Optional[str] = None): 
+    story.append(Paragraph(f"Completion {completion_idx + 1}", styles['h3']))
+
+    # Display image for this completion (e.g., with click for GUI)
+    if image_path_for_completion_pdf and os.path.exists(image_path_for_completion_pdf):
+        try:
+            img = PILImage.open(image_path_for_completion_pdf)
+            img_width, img_height = img.size
+            aspect = img_height / float(img_width)
+            display_width = 2.0 * inch # Slightly smaller for completion image
+            display_height = display_width * aspect
+            if display_height > 3.0 * inch:
+                display_height = 3.0 * inch
+                display_width = display_height / aspect
+            
+            story.append(PlatypusImage(image_path_for_completion_pdf, width=display_width, height=display_height))
+            story.append(Spacer(1, 0.05*inch))
+        except Exception as e:
+            story.append(Paragraph(f"Error loading completion image: {image_path_for_completion_pdf}. Error: {e}", styles['Italic']))
+    
+    # Display full completion text (escaped)
+    story.append(Paragraph(f"<b>Full Model Output:</b>", styles['BodyText']))
+    escaped_completion = html.escape(completion_text).replace('\n', '<br/>')
+    story.append(Paragraph(escaped_completion, styles['Code']))
+    story.append(Spacer(1, 0.05*inch))
+
+    # Extract and display reasoning and answer separately
+    reasoning = _extract_tagged_content(completion_text, 'reasoning')
+    answer = _extract_tagged_content(completion_text, 'answer')
+
+    story.append(Paragraph(f"<b>Extracted Reasoning:</b>", styles['BodyText']))
+    story.append(Paragraph(html.escape(reasoning) if reasoning else "<i>N/A</i>", styles['Code']))
+    story.append(Spacer(1, 0.05*inch))
+
+    story.append(Paragraph(f"<b>Extracted Answer:</b>", styles['BodyText']))
+    story.append(Paragraph(html.escape(answer) if answer else "<i>N/A</i>", styles['Code']))
+    story.append(Spacer(1, 0.1*inch))
+
+    if metrics:
+        # Create a more structured table for metrics if many, or simple paragraphs
+        metrics_data = [["Metric", "Value"]]
+        for name, value in metrics.items():
+            # Optionally shorten name for display
+            display_name = name.replace("rewards/", "").replace("metrics/", "")
+            if isinstance(value, float):
+                metrics_data.append([display_name, f"{value:.4f}"])
+            else:
+                metrics_data.append([display_name, str(value)])
         
-        if not img_width or not img_height:
-             raise ValueError("Image dimensions are zero or invalid.")
-
-        aspect = img_height / float(img_width)
-        
-        # Calculate proposed width/height based on max width
-        proposed_width = PDF_IMAGE_WIDTH
-        proposed_height = proposed_width * aspect
-
-        # If proposed height is too large, recalculate based on max height
-        if proposed_height > PDF_MAX_IMAGE_HEIGHT:
-            proposed_height = PDF_MAX_IMAGE_HEIGHT
-            proposed_width = proposed_height / aspect
-            # Ensure width doesn't exceed max width after height adjustment
-            if proposed_width > PDF_IMAGE_WIDTH:
-                proposed_width = PDF_IMAGE_WIDTH
-                proposed_height = proposed_width * aspect
-
-        # Set final dimensions
-        img.drawWidth = proposed_width
-        img.drawHeight = proposed_height
-        
-        story.append(img)
-    except Exception as e:
-        print(f"Warning: Could not add image {img_path} to PDF. Error: {e}")
-        story.append(Paragraph(f"<i>Error loading/scaling image: {os.path.basename(img_path)}</i>", styles['Italic']))
-    story.append(Spacer(1, 0.2 * inch))
-
-    story.append(Paragraph("Question:", styles['Bold']))
-    story.append(Paragraph(html.escape(prompt), styles['Code'])) # Escape prompt too
-    story.append(Spacer(1, 0.2 * inch))
-
-    story.append(Paragraph("Ground Truth:", styles['Bold']))
-    story.append(Paragraph(html.escape(answer), styles['Code'])) # Escape answer too
-    story.append(Spacer(1, 0.2 * inch))
+        if len(metrics_data) > 1:
+             # Adjusted colWidths: more space for metric name
+            table = Table(metrics_data, colWidths=[2.8*inch, 1.2*inch])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0,0), (-1,0), 12),
+                ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+                ('GRID', (0,0), (-1,-1), 1, colors.black),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), # Improve vertical alignment
+                ('WORDWRAP', (0,1), (0,-1)), # Allow metric names to wrap
+            ]))
+            story.append(table)
+    story.append(Spacer(1, 0.15*inch))
 
 def _process_single_completion_for_eval(
-    completion_text: str,
-    eval_class: evaluator.RewardEvaluator,
-    answer: str,
-    device: str,
-    story: list,
-    styles: dict,
-    completion_idx: int
-) -> tuple[dict, int, int]:
-    """ 
-    Computes rewards, formats PDF content, and returns metrics/counts for one completion.
-    Adapts to ClockEvaluator metrics while preserving original return signature.
+    completion_text: str, 
+    eval_class: evaluator.RewardEvaluator, 
+    answer_data: Any, # This is target_details for GUI, answer_str for clock/correlation
+    device: str, 
+    story: Optional[list] = None, # Make it optional
+    styles: Optional[dict] = None, # Make it optional
+    completion_idx: int = 0,
+    dataset_type: str = 'gui',
+    original_image_path: Optional[str] = None,
+    vis_image_path_for_pdf: Optional[str] = None,
+    gui_plotter: Optional[callable] = None
+) -> Optional[dict[str, float]]:
     """
-    # --- Add completion details to PDF (Existing logic) ---
-    story.append(Paragraph(f"Response #{completion_idx + 1}:", styles['Bold']))
-    story.append(Paragraph("Full Response:", styles['Italic']))
-    escaped_completion_text = html.escape(completion_text) 
-    story.append(Paragraph(escaped_completion_text, styles['Code']))
+    Processes a single completion text for evaluation and optionally adds it to a PDF story.
+    Returns a dictionary of metric scores for this single completion.
+    """
+    if dataset_type == 'gui':
+        # For GUI, answer_data is the target_details_dict
+        # The evaluator's compute_rewards expects a list of answers.
+        # For a single completion, we wrap answer_data in a list.
+        current_answers_list = [answer_data]
+        # The evaluator also expects completions in a specific nested list structure.
+        current_completions_list = [[{'content': completion_text}]]
+    else: # clock, correlation
+        # For clock/correlation, answer_data is the answer string.
+        current_answers_list = [answer_data]
+        current_completions_list = [[{'content': completion_text}]]
 
-    reasoning = _extract_tagged_content(completion_text, 'reasoning')
-    extracted_answer = _extract_tagged_content(completion_text, 'answer')
-
-    story.append(Paragraph("Extracted Reasoning:", styles['Italic']))
-    story.append(Paragraph(html.escape(reasoning) if reasoning else "<i>Couldn't extract reasoning tag.</i>", styles['Code'] if reasoning else styles['Normal']))
-    story.append(Spacer(1, 0.1 * inch))
-        
-    story.append(Paragraph("Extracted Answer:", styles['Italic']))
-    story.append(Paragraph(html.escape(extracted_answer) if extracted_answer else "<i>Couldn't extract answer tag.</i>", styles['Code'] if extracted_answer else styles['Normal']))
-    story.append(Spacer(1, 0.1 * inch))
-
-    story.append(Paragraph("Metrics:", styles['Italic']))
-    # --- End Add completion details to PDF ---
-
-    # Evaluate the single completion using ClockEvaluator
-    mock_completion = [[{'role': 'assistant', 'content': completion_text}]]
-    # Ensure answers is a list, expected by ClockEvaluator
-    answers_list = [answer] if not isinstance(answer, list) else answer 
-    rewards_per_func, metrics_single = eval_class.compute_rewards(
-        prompts=None, 
-        completions=mock_completion, 
-        answers=answers_list, # Pass list of answers
-        device=device
+    # Get rewards and metrics for this single completion
+    # The evaluator's compute_rewards should return rewards_per_func and metrics
+    # rewards_per_func will be a tensor for this one completion, e.g., shape [1, num_reward_components]
+    # metrics will be a dict like {'metric_name': value_tensor}
+    rewards_per_func_single, metrics_single_dict_tensors = eval_class.compute_rewards(
+        prompts=None, # Not always needed by evaluator if context is in answer_data
+        completions=current_completions_list,
+        answers=current_answers_list,
+        device=device # device might be used by evaluator internally
     )
-    # Add calculated metrics to PDF
-    if metrics_single:
-        metric_items = [f"- {metric}: {value:.4f}" for metric, value in metrics_single.items()]
-        for item in metric_items:
-             story.append(Paragraph(item, styles['Normal']))
-    else:
-         story.append(Paragraph("- <i>Metrics computation failed or N/A</i>", styles['Normal']))
 
-    # Calculate total score for this completion (sum of reward components)
-    total_score = rewards_per_func.sum().item() if rewards_per_func is not None else 0.0
-    story.append(Paragraph(f"Total Score: {total_score:.4f}", styles['Normal']))
-    story.append(Spacer(1, 0.2 * inch))
+    # Convert metric tensors to scalar floats and ensure all are included
+    # Also, get the reward breakdown for PDF logging if story is present
+    processed_metrics_for_return = {}
+    if metrics_single_dict_tensors and isinstance(metrics_single_dict_tensors, dict):
+        for k, v_tensor in metrics_single_dict_tensors.items():
+            if torch.is_tensor(v_tensor) and v_tensor.numel() == 1:
+                processed_metrics_for_return[k] = v_tensor.item()
+            elif isinstance(v_tensor, (float, int)):
+                 processed_metrics_for_return[k] = v_tensor
+            # else: might be other types of metrics not directly plottable/averageable
 
-            
-    return metrics_single
-
-def _calculate_and_log_final_metrics(
-    avg_scores: dict[str, float],
-    json_dir: str,
-    round_num: int,
-    verbose: bool
-) -> None:
-    """ Saves JSON, prints verbose output, and returns results."""
+    # Get reward breakdown if needed (e.g., for PDF)
+    # rewards_per_func_single should be for one sample, e.g., shape [1, num_reward_components]
+    # We need to pass the actual reward scores for this one completion to get_reward_breakdown
+    reward_scores_for_breakdown = rewards_per_func_single[0] # Get the tensor for the first (only) sample
     
-    final_metrics_data = {
-        'average_metrics_per_example': avg_scores
-    }
-    
-    metrics_path = os.path.join(json_dir, f'eval_metrics_{round_num}.json')
-    with open(metrics_path, 'w') as f:
-        json.dump(final_metrics_data, f, indent=4, default=str) 
+    # Add overall reward to the metrics
+    total_reward_single = reward_scores_for_breakdown.sum().item()
+    processed_metrics_for_return['reward'] = total_reward_single # Ensure 'reward' key exists
 
+    # --- PDF Logging Section ---
+    # Only attempt PDF operations if story and styles are provided
+    if story is not None and styles is not None:
+        reward_breakdown_for_pdf = eval_class.get_reward_breakdown(reward_scores_for_breakdown)
+        
+        # Add raw completion and its detailed scores to the PDF
+        # This was the problematic part: _add_completion_to_pdf
+        # It needs image handling as well if it's a GUI task for visualization
+        
+        img_path_for_pdf_entry = None
+        if dataset_type == 'gui' and original_image_path and vis_image_path_for_pdf and gui_plotter:
+            try:
+                # Plot click for GUI task if a plotter is provided
+                if isinstance(eval_class, evaluator.GUIEvaluator): # Check if it's the right evaluator
+                    parsed_click = eval_class._extract_coordinates(completion_text) # Protected access, but used in main.py
+                    if parsed_click:
+                        pil_img = PILImage.open(original_image_path)
+                        plot_data = [{
+                            "name": "VLM Click", 
+                            "center_x": parsed_click[0], 
+                            "center_y": parsed_click[1],
+                            "is_truth": False 
+                        }]
+                        # GUIGenerator.plot_predictions returns a PIL Image
+                        img_w_click = gui_plotter(pil_img, plot_data, pred_color="red")
+                        img_w_click.save(vis_image_path_for_pdf)
+                        img_path_for_pdf_entry = vis_image_path_for_pdf
+                    else:
+                        # If click not parsed, use original image for PDF (or None if vis_image_path_for_pdf was for specific click)
+                        img_path_for_pdf_entry = original_image_path # Or handle as per main.py logic
+                else:
+                    img_path_for_pdf_entry = original_image_path # Fallback for non-GUIEvaluator or if no click
+            except Exception as plot_err:
+                if verbose: # Assuming verbose is accessible or passed
+                    print(f"  Warning: Error plotting click for PDF (utils): {plot_err}")
+                img_path_for_pdf_entry = original_image_path # Fallback
+        elif dataset_type != 'gui' and original_image_path:
+             img_path_for_pdf_entry = original_image_path
+
+
+        _add_completion_to_pdf(
+            story, styles, completion_text, 
+            reward_breakdown_for_pdf, # Pass the breakdown
+            total_reward_single, # Pass the total reward for this completion
+            completion_idx,
+            # image_path_for_completion_pdf=img_path_for_pdf_entry # Add this if _add_completion_to_pdf supports it
+            # For now, _add_completion_to_pdf from snippet doesn't take image path directly for completion.
+            # It's usually added in _add_example_header_to_pdf.
+            # If you want image per completion, _add_completion_to_pdf needs an update.
+        )
+        
+        # Add PageBreak if needed (e.g., after every N completions)
+        # This logic might be better placed in the calling function (e.g., eval_on_test_set)
+        # as it depends on how many completions are processed per example.
+        # if (completion_idx + 1) % MAX_COMPLETIONS_PER_PAGE_PDF == 0:
+        # story.append(PageBreak())
+    # --- End PDF Logging Section ---
+
+    return processed_metrics_for_return
+
+def _calculate_and_log_final_metrics(all_avg_scores: dict, json_dir: str, round_num: int, verbose: bool):
+    """Saves combined average scores (overall, normal, hard) to JSON and prints if verbose."""
+    # Save average scores to a JSON file
+    avg_scores_path = os.path.join(json_dir, f'average_scores_round_{round_num}.json')
+    with open(avg_scores_path, 'w') as f:
+        # Log all average scores (overall, normal, hard)
+        json.dump(all_avg_scores, f, indent=4)
+    
     if verbose:
-        print("\n--- Evaluation Results ---")
-        for avg_metric_name, value in avg_scores.items():
-            clean_name = avg_metric_name.replace('avg_', '').replace('metrics/', '').replace('rewards/', '').replace('_reward_func','').replace('_', ' ').capitalize()
-            print(f"- {clean_name:<30}: {value:.4f}") 
-        print("-" * 30) 
+        print(f"\n--- Evaluation Results (Round {round_num}) ---")
+        print(f"Average scores saved to {avg_scores_path}")
+        print("Average Scores Breakdown:")
+        # Nicely print the different groups if they exist
+        print("  --- Overall --- ")
+        for name, value in all_avg_scores.items():
+            if name.startswith("avg_overall_"):
+                 print(f"    {name.replace('avg_overall_',''):<35}: {value:.4f}")
+        print("  --- Normal Subset --- ")
+        for name, value in all_avg_scores.items():
+            if name.startswith("avg_normal_"):
+                 print(f"    {name.replace('avg_normal_',''):<35}: {value:.4f}")
+        if not any(k.startswith("avg_normal_") for k in all_avg_scores):
+            print("    (No normal examples in this evaluation)")
+        print("  --- Hard Subset --- ")
+        for name, value in all_avg_scores.items():
+            if name.startswith("avg_hard_"):
+                 print(f"    {name.replace('avg_hard_',''):<35}: {value:.4f}")
+        if not any(k.startswith("avg_hard_") for k in all_avg_scores):
+            print("    (No hard examples in this evaluation)")
+        print("-" * 40)
+
+def _add_training_completion_to_pdf(story: list, styles: dict, 
+                                    completion_text: str, 
+                                    reward_breakdown: Dict[str, float], 
+                                    advantage: float, 
+                                    completion_idx: int, 
+                                    image_path_for_completion_pdf: Optional[str] = None):
+    """Adds details for a single training completion (including scores and advantage) to the PDF story."""
+    story.append(Paragraph(f"Training Completion {completion_idx + 1}", styles['h3']))
+
+    # Display visualized image (e.g., with click for GUI)
+    if image_path_for_completion_pdf and os.path.exists(image_path_for_completion_pdf):
+        try:
+            img = PILImage.open(image_path_for_completion_pdf)
+            img_width, img_height = img.size
+            aspect = img_height / float(img_width)
+            display_width = 2.0 * inch 
+            display_height = display_width * aspect
+            if display_height > 3.0 * inch:
+                display_height = 3.0 * inch
+                display_width = display_height / aspect
+            
+            story.append(PlatypusImage(image_path_for_completion_pdf, width=display_width, height=display_height))
+            story.append(Spacer(1, 0.05*inch))
+        except Exception as e:
+            story.append(Paragraph(f"Error loading training completion image: {image_path_for_completion_pdf}. Error: {e}", styles['Italic']))
+    
+    # Display full completion text (escaped)
+    story.append(Paragraph(f"<b>Full Model Output:</b>", styles['BodyText']))
+    escaped_completion = html.escape(completion_text).replace('\n', '<br/>')
+    story.append(Paragraph(escaped_completion, styles['Code']))
+    story.append(Spacer(1, 0.05*inch))
+
+    # Display Reward Breakdown and Advantage
+    story.append(Paragraph(f"<b>Scores & Advantage:</b>", styles['BodyText']))
+    data_table = [["Component", "Value"]]
+    total_reward = 0
+    if reward_breakdown:
+        for name, value in reward_breakdown.items():
+            data_table.append([name, f"{value:.4f}"])
+            total_reward += value
+    data_table.append(["Total Reward (sum)", f"{total_reward:.4f}"])
+    data_table.append(["Advantage", f"{advantage:.4f}"])
+    
+    table = Table(data_table, colWidths=[2.0*inch, 1.5*inch]) # Adjusted width
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.darkblue),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0,0), (-1,0), 8),
+        ('BACKGROUND', (0,1), (-1,-1), colors.lightblue),
+        ('GRID', (0,0), (-1,-1), 1, colors.black),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('WORDWRAP', (0,1), (0,-1)),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 0.15*inch))
 
 
 

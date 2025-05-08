@@ -6,11 +6,187 @@ import matplotlib.pyplot as plt
 import matplotlib.style as style
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.ticker import MaxNLocator
+import re
+from collections import defaultdict
+from typing import Optional # Added for type hinting
 
 def moving_average(data, window_size=5):
     """Calculate moving average with given window size"""
     weights = np.ones(window_size) / window_size
     return np.convolve(data, weights, mode='valid')
+
+# Global text color (defined later in create_plots, but used by plot_metric)
+text_color = '#E0E0E0' 
+bg_color = '#212946'
+grid_color = '#2A3459'
+
+def apply_retro_futurism_style(ax, fig, line_color):
+    """Applies a retro-futuristic style to the plot."""
+    # bg_color, grid_color, text_color are now global for access in legend styling too
+    
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(bg_color)
+
+    ax.spines['top'].set_color(grid_color)
+    ax.spines['bottom'].set_color(grid_color)
+    ax.spines['left'].set_color(grid_color)
+    ax.spines['right'].set_color(grid_color)
+
+    ax.tick_params(axis='x', colors=text_color, labelsize=12) # Adjusted label size
+    ax.tick_params(axis='y', colors=text_color, labelsize=12) # Adjusted label size
+    ax.yaxis.label.set_color(text_color)
+    ax.xaxis.label.set_color(text_color)
+    ax.title.set_color(text_color)
+
+    ax.grid(True, color=grid_color, linestyle='--', linewidth=0.5, alpha=0.7)
+    
+    return line_color
+
+def plot_metric(metric_name, rounds, values, output_path, line_color_hex, claude_score: Optional[float] = None):
+    """Plots a single metric over rounds and saves it as a PNG, optionally adding a Claude score line."""
+    global text_color, bg_color, grid_color # Ensure access to global style vars
+
+    print(f"Plotting {metric_name}...")
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    actual_line_color = apply_retro_futurism_style(ax, fig, line_color_hex)
+
+    # Main line for the trained model
+    ax.plot(rounds, values, marker='o', linestyle='-', color=actual_line_color, linewidth=2, markersize=5, zorder=10, label='Trained Model')
+
+    # Glow effect
+    n_glow_lines = 10
+    diff_linewidth = 1.0
+    alpha_value = 0.04
+    for n in range(1, n_glow_lines + 1):
+        ax.plot(rounds, values, marker='', linestyle='-',
+                linewidth=2 + (diff_linewidth * n),
+                alpha=alpha_value,
+                color=actual_line_color,
+                zorder=5)
+
+    ax.fill_between(rounds, values, color=actual_line_color, alpha=0.1, zorder=1)
+    
+    # Add Claude's score as a horizontal line if provided
+    if claude_score is not None:
+        ax.axhline(y=claude_score, color='#FFD700', linestyle='--', linewidth=2.5, label='Claude Sonnet 3.7 Level', zorder=15) # Gold color, slightly thicker
+
+    try:
+        plt.rcParams['font.family'] = 'Consolas'
+    except:
+        print("Retro font not found, using default.")
+
+    title_fontsize = 18
+    label_fontsize = 14
+    plot_title = f'{metric_name} Over Rounds'
+
+    if metric_name == "avg_overall_metrics/click_hit_rate":
+        plot_title = "Percent Correct Clicks"
+        title_fontsize = 22
+        label_fontsize = 16
+
+    ax.set_title(plot_title, fontsize=title_fontsize, color=text_color, pad=20)
+    ax.set_xlabel('Round Number', fontsize=label_fontsize, color=text_color)
+    ax.set_ylabel('Metric Value', fontsize=label_fontsize, color=text_color)
+    
+    if all(isinstance(r, (int, np.integer)) for r in rounds):
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+
+    # Add legend
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        legend = ax.legend(handles=handles, labels=labels, loc='best', facecolor=bg_color, edgecolor=grid_color, fontsize=label_fontsize - 2, framealpha=0.8)
+        for text_obj in legend.get_texts():
+            text_obj.set_color(text_color)
+            
+    plt.tight_layout()
+    try:
+        fig.savefig(output_path, facecolor=fig.get_facecolor(), edgecolor='none', dpi=150) # Increased DPI
+        print(f"Saved plot to {output_path}")
+    except Exception as e:
+        print(f"Error saving plot {output_path}: {e}")
+    plt.close(fig)
+
+def create_plots():
+    global text_color, bg_color, grid_color # Define globals for styling consistency
+    text_color = '#E0E0E0'
+    bg_color = '#212946'
+    grid_color = '#2A3459'
+
+    json_reports_dir = "gui_testing_hard/eval_logs/json_reports/"
+    plots_output_dir = "gui_plots/"
+    claude_eval_json_path = "claude_gui_eval_results/claude_eval.json"
+
+    if not os.path.exists(plots_output_dir):
+        os.makedirs(plots_output_dir)
+        print(f"Created directory: {plots_output_dir}")
+
+    # Load Claude's evaluation scores
+    claude_scores_data = {}
+    if os.path.exists(claude_eval_json_path):
+        try:
+            with open(claude_eval_json_path, 'r') as f:
+                claude_scores_data = json.load(f)
+            print(f"Successfully loaded Claude scores from {claude_eval_json_path}")
+        except json.JSONDecodeError:
+            print(f"Error decoding JSON from {claude_eval_json_path}. Claude scores will not be plotted.")
+        except Exception as e:
+            print(f"Error loading Claude scores from {claude_eval_json_path}: {e}. Claude scores will not be plotted.")
+    else:
+        print(f"Warning: Claude scores file not found at {claude_eval_json_path}. Claude lines will not be plotted.")
+
+    all_metrics_data = defaultdict(lambda: {'rounds': [], 'values': []})
+    json_files = [f for f in os.listdir(json_reports_dir) if f.startswith('average_scores_round_') and f.endswith('.json')]
+
+    def extract_round_num(filename):
+        match = re.search(r'average_scores_round_(\d+)\.json', filename)
+        return int(match.group(1)) if match else -1
+
+    json_files.sort(key=extract_round_num)
+    
+    if not json_files:
+        print(f"No 'average_scores_round_*.json' files found in {json_reports_dir}")
+        return
+    print(f"Found {len(json_files)} average score JSON files for the main model.")
+
+    for filename in json_files:
+        round_num = extract_round_num(filename)
+        if round_num == -1:
+            continue
+        file_path = os.path.join(json_reports_dir, filename)
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+            for metric_name, value in data.items():
+                if isinstance(value, (int, float)):
+                    all_metrics_data[metric_name]['rounds'].append(round_num)
+                    all_metrics_data[metric_name]['values'].append(value)
+        except Exception as e:
+            print(f"Error processing file {file_path}: {e}, skipping.")
+
+    if not all_metrics_data:
+        print("No plottable data found in main model JSON files.")
+        return
+
+    line_colors = ['#08F7FE', '#FE53BB', '#F5D300', '#00FF41', '#FF6C11', '#FD1D53', '#710193', '#FFFFFF']
+
+    for i, (metric_name, data) in enumerate(all_metrics_data.items()):
+        if not data['rounds'] or not data['values']:
+            print(f"Skipping metric {metric_name} due to missing rounds or values.")
+            continue
+        
+        safe_metric_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', metric_name)
+        output_filename = f"{safe_metric_name}.png"
+        output_path = os.path.join(plots_output_dir, output_filename)
+        current_line_color = line_colors[i % len(line_colors)]
+        
+        # Get Claude's score for the current metric
+        claude_value_for_metric = claude_scores_data.get(metric_name)
+        if claude_value_for_metric is not None and not isinstance(claude_value_for_metric, (int, float)):
+            print(f"Warning: Claude score for '{metric_name}' is not a number: {claude_value_for_metric}. Not plotting Claude line.")
+            claude_value_for_metric = None
+            
+        plot_metric(metric_name, data['rounds'], data['values'], output_path, current_line_color, claude_score=claude_value_for_metric)
 
 def plot_metrics(output_dir):
     """
@@ -268,3 +444,5 @@ if __name__ == "__main__":
     # Removed log_dir as output_dir is now the standard
     args = parser.parse_args()
     plot_metrics(args.output_dir)
+    create_plots()
+    print("Plotting script finished.")

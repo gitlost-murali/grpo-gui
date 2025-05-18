@@ -483,7 +483,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="GRPO training arguments")
     
     # Model configuration
-    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct", help="Model identifier for main and base model")
+    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct", help="Model identifier for main and base model")
     parser.add_argument("--dataset_type", type=str, default="clock", choices=["clock", "correlation", "gui"], help="Type of dataset to use ('clock', 'correlation', or 'gui')")
 
     # Output and logging

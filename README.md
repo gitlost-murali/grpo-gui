@@ -11,7 +11,8 @@ I hope this might help other people understand things better, and maybe provide 
 
 ## Installation
 ```
-pip install -r requirements.txt
+uv sync
+uv pip install flash-attn --no-build-isolation
 ```
 
 Required environment variables:

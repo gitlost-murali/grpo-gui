@@ -21,8 +21,8 @@ from reportlab.platypus import PageBreak # Import PageBreak
 import llms
 import utils
 import evaluator
-import rldatasets
-from gui_generator import GUIGenerator # For PDF plotting
+import rldatasets as rldatasets
+from rldatasets.gui.gui_generator import GUIGenerator # For PDF plotting
 
 def eval_on_test_set(
     model: PreTrainedModel,

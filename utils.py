@@ -20,7 +20,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from qwen_vl_utils import process_vision_info
 
 import evaluator
-from gui_generator import GUIGenerator # For plot_predictions type hint if GUI specific logic
+from rldatasets.gui.gui_generator import GUIGenerator # For plot_predictions type hint if GUI specific logic
 
 MAX_COMPLETIONS_PER_PAGE_PDF = 2
 MAX_PROMPT_LENGTH_PDF = 300 # Add the missing constant definition

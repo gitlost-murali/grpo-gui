@@ -10,8 +10,8 @@ import numpy as np # Added numpy
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Any, Optional
 
-from clock_generator import TimeObj # Import TimeObj
-from gui_generator import IMAGE_WIDTH, IMAGE_HEIGHT # For max distance calculation
+from rldatasets.clock.clock_generator import TimeObj # Import TimeObj
+from rldatasets.gui.gui_generator import IMAGE_WIDTH, IMAGE_HEIGHT # For max distance calculation
 
 # Maximum possible time difference on a 12-hour clock in seconds (6 hours)
 MAX_DIFF_SECONDS = 6 * 3600 

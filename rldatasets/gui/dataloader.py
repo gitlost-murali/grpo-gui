@@ -36,9 +36,15 @@ class GUIDataLoader(DataLoader):
         prompt_template (str): Base prompt string with placeholder for target object name.
         # `self.prompt` will be dynamically set in __next__ for this loader
     """
-    def __init__(self, dataset_size: int = 50, is_train: bool = True,
-                 image_width: int = 224, image_height: int = 224,
-                 hard_mode_prob: float = 0.1):
+
+    def __init__(
+        self,
+        dataset_size: int = 50,
+        is_train: bool = True,
+        image_width: int = 224,
+        image_height: int = 224,
+        hard_mode_prob: float = 0.1,
+    ):
         super().__init__(random=True)
         self.dataset_size = dataset_size
         self.is_train = is_train
@@ -51,14 +57,14 @@ class GUIDataLoader(DataLoader):
     def __len__(self) -> int:
         return self.dataset_size
 
-    def __iter__(self) -> 'GUIDataLoader':
+    def __iter__(self) -> "GUIDataLoader":
         self.current_index = 0
         return self
 
     def __next__(self) -> Tuple[str, Dict[str, Any]]:
         """
         Returns:
-            Tuple[str, Dict[str, Any]]: 
+            Tuple[str, Dict[str, Any]]:
                 - image_path (str): Path to the saved GUI image.
                 - target_info (Dict[str, Any]): Dictionary containing target details:
                     {'name': str, 'bounding_box': tuple, 'center_x': int, 'center_y': int, 'dynamic_prompt': str, 'is_hard': bool}
@@ -74,22 +80,30 @@ class GUIDataLoader(DataLoader):
         target_info = None
         max_retries = 5
         for _ in range(max_retries):
-            gui_image, _, temp_target_info = self.gui_generator.generate_scene_with_target(generate_hard_mode=use_hard_mode)
+            gui_image, _, temp_target_info = (
+                self.gui_generator.generate_scene_with_target(
+                    generate_hard_mode=use_hard_mode
+                )
+            )
             if temp_target_info:
                 target_info = temp_target_info
                 break
 
         if not target_info:
             all_elements = json.loads(_)
-            if all_elements and any(el['name'] == 'window' for el in all_elements):
-                target_info = next(el for el in all_elements if el['name'] == 'window')
+            if all_elements and any(el["name"] == "window" for el in all_elements):
+                target_info = next(el for el in all_elements if el["name"] == "window")
             else:
-                raise ValueError("Failed to generate a GUI scene with any identifiable target element after multiple retries.")
+                raise ValueError(
+                    "Failed to generate a GUI scene with any identifiable target element after multiple retries."
+                )
 
         gui_image.save(self.temp_image_path)
 
-        target_object_name_for_prompt = target_info['name'].replace("_", " ")
-        self.prompt = self.prompt_template.format(target_object_name=target_object_name_for_prompt)
+        target_object_name_for_prompt = target_info["name"].replace("_", " ")
+        self.prompt = self.prompt_template.format(
+            target_object_name=target_object_name_for_prompt
+        )
 
         # Add the 'is_hard' flag to the answer dictionary
         answer_for_evaluator = {
@@ -98,7 +112,7 @@ class GUIDataLoader(DataLoader):
             "center_x": target_info["center_x"],
             "center_y": target_info["center_y"],
             "dynamic_prompt": self.prompt,
-            "is_hard": use_hard_mode
+            "is_hard": use_hard_mode,
         }
 
         return self.temp_image_path, answer_for_evaluator

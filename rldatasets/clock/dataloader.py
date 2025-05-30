@@ -1,9 +1,8 @@
 from .clock_generator import ClockGen, TimeObj
 from ..base_loader import DataLoader
 from typing import Tuple
-import random
 
-CLOCK_PROMPT = f"""
+CLOCK_PROMPT = """
 You will be shown an image of an analog clock. Your task is to determine the time shown.
 
 You must answer in the following format exactly:
@@ -44,7 +43,7 @@ class ClockDataLoader(DataLoader):
         # Return the specified size, mainly relevant for the test set iteration count
         return self.dataset_size
 
-    def __iter__(self) -> 'ClockDataLoader':
+    def __iter__(self) -> "ClockDataLoader":
         self.current_index = 0
         return self
 

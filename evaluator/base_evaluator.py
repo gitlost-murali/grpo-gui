@@ -24,7 +24,7 @@ class RewardEvaluator(ABC):
         prompts: List[List[Dict[str, str]]],
         completions: List[List[Dict[str, str]]],
         answer: Any,
-        device: str
+        device: str,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Compute rewards for a batch of completions.

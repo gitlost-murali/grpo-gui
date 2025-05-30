@@ -5,7 +5,7 @@ from ..base_loader import DataLoader
 import random
 from typing import Tuple
 
-CORRELATION_PROMPT = f"""
+CORRELATION_PROMPT = """
 You will be shown a scatter plot image displaying a relationship between two variables.
 Your task is to estimate the Pearson correlation coefficient (R) depicted in the plot.
 The correlation R is a value between 0.00 and 1.00, where 0.00 indicates no correlation and 1.00 indicates perfect positive correlation.
@@ -39,22 +39,24 @@ class CorrelationScatterDataLoader(DataLoader):
     """
 
     def __init__(self, dataset_size: int = 50, is_train: bool = True) -> None:
-        super().__init__(random=True) # Always generates random correlations
+        super().__init__(random=True)  # Always generates random correlations
         self.dataset_size = dataset_size
         self.is_train = is_train
         self.prompt = CORRELATION_PROMPT
-        self.temp_image_path = "temp_correlation.png" # Fixed path for the temporary image
-        self.num_points = 75 # Standard number of points for correlation plots
-        self.image_size = (224, 224) # Standard size
+        self.temp_image_path = (
+            "temp_correlation.png"  # Fixed path for the temporary image
+        )
+        self.num_points = 75  # Standard number of points for correlation plots
+        self.image_size = (224, 224)  # Standard size
 
     def __len__(self) -> int:
         return self.dataset_size
 
-    def __iter__(self) -> 'CorrelationScatterDataLoader':
+    def __iter__(self) -> "CorrelationScatterDataLoader":
         self.current_index = 0
         return self
 
-    def __next__(self) -> Tuple[str, str]: # Returns path and label string
+    def __next__(self) -> Tuple[str, str]:  # Returns path and label string
         if not self.is_train and self.current_index >= self.dataset_size:
             raise StopIteration
 
@@ -67,14 +69,14 @@ class CorrelationScatterDataLoader(DataLoader):
         generate_correlation_plot(
             r_value=r_value,
             num_points=self.num_points,
-            filename=self.temp_image_path, # Save to temp path
+            filename=self.temp_image_path,  # Save to temp path
             img_size=self.image_size,
         )
 
         # Format the R value string to X.XX
         r_string = f"{r_value:.2f}"
 
-        return self.temp_image_path, r_string # Return path and label
+        return self.temp_image_path, r_string  # Return path and label
 
     def reset(self):
         self.current_index = 0

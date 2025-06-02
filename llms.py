@@ -17,6 +17,7 @@ from transformers import (
 )
 from qwen_vl_utils import process_vision_info
 from transformers import BitsAndBytesConfig
+from PIL import Image
 
 
 def get_llm_tokenizer(
@@ -69,7 +70,7 @@ def get_llm_tokenizer(
 def generate_completions(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerBase,
-    image_path: str,
+    img_or_image_path: str | Image.Image,
     prompt: str,
     device: str,
     args: argparse.Namespace,
@@ -103,7 +104,7 @@ def generate_completions(
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": image_path},
+                {"type": "image", "image": img_or_image_path},
                 {"type": "text", "text": prompt},
             ],
         },

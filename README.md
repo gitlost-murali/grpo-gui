@@ -13,6 +13,8 @@ I hope this might help other people understand things better, and maybe provide 
 ```
 uv sync
 uv pip install flash-attn --no-build-isolation
+
+uv sync --extra dev # for linting and testing
 ```
 
 Required environment variables:

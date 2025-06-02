@@ -32,9 +32,9 @@ def parse_args():
     parser.add_argument(
         "--dataset_type",
         type=str,
-        default="clock",
-        choices=["clock", "correlation", "gui"],
-        help="Type of dataset to use ('clock', 'correlation', or 'gui')",
+        default="gui_hard",
+        choices=["gui", "gui_hard"],
+        help="Type of dataset to use ('gui', 'gui_hard')",
     )
 
     # Output and logging
@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument(
         "--eval_iterations",
         type=int,
-        default=50,
+        default=5,
         help="Number of iterations for evaluation",
     )
     parser.add_argument(
@@ -158,7 +158,9 @@ if __name__ == "__main__":
     base_model, _ = llms.get_llm_tokenizer(args.model_name_or_path, device)
 
     print(f"Loading dataset: {args.dataset_type}")
-    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_type)
+    train_loader, test_loader = rldatasets.get_dataloaders(
+        args.dataset_type, dataset_size=10
+    )
 
     print(f"Loading evaluator for: {args.dataset_type}")
     eval_class = evaluator.get_evaluator(args.dataset_type)

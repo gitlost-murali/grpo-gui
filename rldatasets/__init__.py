@@ -3,12 +3,13 @@ Data loader for generating analog clock images and times.
 """
 
 from typing import Tuple, Any
-from .clock.dataloader import ClockDataLoader
-from .correlation.dataloader import CorrelationScatterDataLoader
+
+from . import real_gui
 from .gui.dataloader import GUIDataLoader
 from .real_gui.dataloader import RealGUIDataLoader
-from .gui.gui_generator import GUIGenerator
 from .base_loader import DataLoader
+
+__all__ = ["real_gui"]
 
 
 # --- Factory Function ---
@@ -38,19 +39,7 @@ def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader
 
     dataset_name = dataset_name.lower()
 
-    if dataset_name == "clock":
-        trainloader = ClockDataLoader(dataset_size=dataset_size * 100, is_train=True)
-        testloader = ClockDataLoader(dataset_size=dataset_size, is_train=False)
-        return trainloader, testloader
-    elif dataset_name == "correlation":
-        trainloader = CorrelationScatterDataLoader(
-            dataset_size=dataset_size * 100, is_train=True
-        )
-        testloader = CorrelationScatterDataLoader(
-            dataset_size=dataset_size, is_train=False
-        )
-        return trainloader, testloader
-    elif dataset_name == "gui":
+    if dataset_name == "gui":
         trainloader = GUIDataLoader(
             dataset_size=dataset_size * 100,
             is_train=True,
@@ -67,55 +56,16 @@ def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader
         )
         return trainloader, testloader
     elif dataset_name == "gui_hard":
-        trainloader = RealGUIDataLoader(dataset_size=dataset_size * 100, is_train=True)
-        testloader = RealGUIDataLoader(dataset_size=dataset_size, is_train=False)
+        trainloader = RealGUIDataLoader(is_train=True, dataset_size=dataset_size * 100)
+        testloader = RealGUIDataLoader(is_train=False, dataset_size=dataset_size)
         return trainloader, testloader
-
     else:
         raise ValueError(
-            f"Dataset '{dataset_name}' not supported. Supported: 'clock', 'correlation', 'gui'"
+            f"Dataset '{dataset_name}' not supported. Supported: 'gui', 'gui_hard'"
         )
 
 
 if __name__ == "__main__":
-    # Test Clock Loader
-    print("--- Testing Clock Loader ---")
-    try:
-        train_loader_c, test_loader_c = get_dataloaders("clock", dataset_size=2)
-        print(f"Clock Train loader prompt: {train_loader_c.prompt[:80]}...")
-        print(f"Clock Test loader length: {len(test_loader_c)}")
-
-        print("  Train Sample:")
-        img_path_c, label_c = next(train_loader_c)
-        print(f"    Image Path: {img_path_c}, Label: {label_c}")
-
-        print("  Test Samples:")
-        test_loader_c.reset()
-        for img_path_c, label_c in test_loader_c:
-            print(f"    Image Path: {img_path_c}, Label: {label_c}")
-        print("  Clock Test loader iteration finished.")
-    except Exception as e:
-        print(f"Error testing clock loader: {e}")
-
-    # Test Correlation Loader
-    print("\n--- Testing Correlation Loader ---")
-    try:
-        train_loader_r, test_loader_r = get_dataloaders("correlation", dataset_size=2)
-        print(f"Correlation Train loader prompt: {train_loader_r.prompt[:80]}...")
-        print(f"Correlation Test loader length: {len(test_loader_r)}")
-
-        print("  Train Sample:")
-        img_path_r, label_r = next(train_loader_r)
-        print(f"    Image Path: {img_path_r}, Label: {label_r}")
-
-        print("  Test Samples:")
-        test_loader_r.reset()
-        for img_path_r, label_r in test_loader_r:
-            print(f"    Image Path: {img_path_r}, Label: {label_r}")
-        print("  Correlation Test loader iteration finished.")
-    except Exception as e:
-        print(f"Error testing correlation loader: {e}")
-
     # Test GUI Loader
     print("\n--- Testing GUI Loader ---")
     try:

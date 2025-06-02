@@ -2,12 +2,11 @@ from .base_evaluator import RewardEvaluator
 import rldatasets as rldatasets
 import utils
 from llms import generate_completions
-from rldatasets.gui.gui_generator import GUIGenerator
 
 
 import torch
 from tqdm import tqdm
-from transformers import PreTrainedModel, PreTrainedTokenizerBase
+from transformers import PreTrainedModel, PreTrainedTokenizerBase  # type: ignore
 
 
 import argparse
@@ -56,11 +55,7 @@ def eval_on_test_set(
     test_loader.reset()
 
     # Determine the correct error metric key based on dataset type
-    if args.dataset_type == "correlation":
-        main_error_metric_key_for_return = "metrics/mean_abs_correlation_error"
-    elif args.dataset_type == "clock":
-        main_error_metric_key_for_return = "metrics/mean_abs_error_seconds"
-    elif args.dataset_type == "gui":
+    if args.dataset_type == "gui" or args.dataset_type == "gui_hard":
         main_error_metric_key_for_return = (
             "metrics/mean_distance_to_center_error"  # Or click_hit_rate if preferred
         )
@@ -69,31 +64,27 @@ def eval_on_test_set(
 
     for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating on test set")):
         is_hard_example = False  # Default for non-GUI tasks
-        if args.dataset_type == "gui":
-            img_path, target_details_dict = batch
+        if args.dataset_type == "gui" or args.dataset_type == "gui_hard":
+            img_or_image_path, target_details_dict = batch
             prompt_to_use = target_details_dict["dynamic_prompt"]
             answer_for_eval_and_pdf = target_details_dict
             is_hard_example = target_details_dict.get("is_hard", False)  # Get the flag
         else:
-            img_path, answer_string = batch
-            prompt_to_use = test_loader.prompt  # Static prompt for clock/correlation
-            answer_for_eval_and_pdf = answer_string
+            raise ValueError(f"Dataset type {args.dataset_type} not supported")
+
         # Generate completions
         # Ensure generate_completions uses the correct prompt (dynamic for GUI)
         _, _, _, _, completions_text, _ = generate_completions(
-            model, tokenizer, img_path, prompt_to_use, device, args, eval=True
+            model, tokenizer, img_or_image_path, prompt_to_use, device, args, eval=True
         )
 
-        # Add example header to PDF (prompt_to_use will have target name for GUI)
-        utils._add_example_header_to_pdf(
-            story,
-            styles,
-            img_path,
-            prompt_to_use,
-            answer_for_eval_and_pdf,
-            num_examples,
-            args.dataset_type,
-            is_hard=is_hard_example,
+        utils.write_generation_log(
+            {
+                "prompt": prompt_to_use,
+                "bounding_box": target_details_dict["bounding_box"],
+                "completions": completions_text,
+            },
+            os.path.join(json_dir, f"generation_log_round_{round_num}.json"),
         )
 
         for completion_idx, completion_text in enumerate(completions_text):
@@ -113,11 +104,6 @@ def eval_on_test_set(
                 styles=styles,
                 completion_idx=completion_idx,
                 dataset_type=args.dataset_type,
-                original_image_path=img_path,  # Pass original image path for GUI task
-                vis_image_path_for_pdf=vis_image_path_for_pdf,  # Path to save visualization
-                gui_plotter=GUIGenerator.plot_predictions
-                if args.dataset_type == "gui"
-                else None,
             )
 
             num_chains_processed_overall += 1
@@ -175,9 +161,6 @@ def eval_on_test_set(
     final_avg_main_metric_value = avg_scores_overall.get(
         f"avg_overall_{main_error_metric_key_for_return}", float("nan")
     )
-
-    doc.build(story)
-    print(f"PDF report saved to {pdf_path}")
 
     utils._calculate_and_log_final_metrics(
         all_avg_scores, json_dir, round_num, args.verbose

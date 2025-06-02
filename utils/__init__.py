@@ -6,9 +6,8 @@ import torch
 import random
 import numpy as np
 import torch.nn.functional as F
-from collections import defaultdict
 from reportlab.lib.units import inch
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, Optional
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import (
     SimpleDocTemplate,
@@ -23,14 +22,9 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.lib import colors
 from PIL import Image as PILImage  # To avoid conflict with ReportLabImage
-from transformers import PreTrainedModel, PreTrainedTokenizerBase
-
 from qwen_vl_utils import process_vision_info
 
 import evaluator
-from rldatasets.gui.gui_generator import (
-    GUIGenerator,
-)  # For plot_predictions type hint if GUI specific logic
 
 MAX_COMPLETIONS_PER_PAGE_PDF = 2
 MAX_PROMPT_LENGTH_PDF = 300  # Add the missing constant definition
@@ -291,7 +285,7 @@ def _truncate_text(text: str, max_length: int) -> str:
 def _add_example_header_to_pdf(
     story: list,
     styles: dict,
-    image_path: str,
+    img_or_image_path: str | PILImage.Image,
     prompt_text: str,
     answer_data: Any,
     example_num: int,
@@ -304,9 +298,14 @@ def _add_example_header_to_pdf(
     story.append(Paragraph(title, styles["h2"]))
 
     # Display image if path is valid
-    if os.path.exists(image_path):
+    if isinstance(img_or_image_path, PILImage.Image) or (
+        isinstance(img_or_image_path, str) and os.path.exists(img_or_image_path)
+    ):
         try:
-            img = PILImage.open(image_path)
+            if isinstance(img_or_image_path, str):
+                img = PILImage.open(img_or_image_path)
+            else:
+                img = img_or_image_path
             img_width, img_height = img.size
             aspect = img_height / float(img_width)
             display_width = 2.5 * inch  # Max width for the image in PDF
@@ -317,17 +316,22 @@ def _add_example_header_to_pdf(
                 display_width = display_height / aspect
 
             story.append(
-                PlatypusImage(image_path, width=display_width, height=display_height)
+                PlatypusImage(
+                    img_or_image_path, width=display_width, height=display_height
+                )
             )
             story.append(Spacer(1, 0.1 * inch))
         except Exception as e:
             story.append(
                 Paragraph(
-                    f"Error loading image: {image_path}. Error: {e}", styles["BodyText"]
+                    f"Error loading image: {img_or_image_path}. Error: {e}",
+                    styles["BodyText"],
                 )
             )
     else:
-        story.append(Paragraph(f"Image not found: {image_path}", styles["BodyText"]))
+        story.append(
+            Paragraph(f"Image not found: {img_or_image_path}", styles["BodyText"])
+        )
 
     # Display full prompt without truncation, escape HTML tags
     story.append(Paragraph("<b>Prompt:</b>", styles["BodyText"]))
@@ -461,26 +465,21 @@ def _process_single_completion_for_eval(
     story: Optional[list] = None,  # Make it optional
     styles: Optional[dict] = None,  # Make it optional
     completion_idx: int = 0,
-    dataset_type: str = "gui",
-    original_image_path: Optional[str] = None,
-    vis_image_path_for_pdf: Optional[str] = None,
-    gui_plotter: Optional[callable] = None,
+    dataset_type: str = "gui_hard",
 ) -> Optional[dict[str, float]]:
     """
     Processes a single completion text for evaluation and optionally adds it to a PDF story.
     Returns a dictionary of metric scores for this single completion.
     """
-    if dataset_type == "gui":
+    if dataset_type == "gui" or dataset_type == "gui_hard":
         # For GUI, answer_data is the target_details_dict
         # The evaluator's compute_rewards expects a list of answers.
         # For a single completion, we wrap answer_data in a list.
         current_answers_list = [answer_data]
         # The evaluator also expects completions in a specific nested list structure.
         current_completions_list = [[{"content": completion_text}]]
-    else:  # clock, correlation
-        # For clock/correlation, answer_data is the answer string.
-        current_answers_list = [answer_data]
-        current_completions_list = [[{"content": completion_text}]]
+    else:
+        raise ValueError(f"Dataset type {dataset_type} not supported")
 
     # Get rewards and metrics for this single completion
     # The evaluator's compute_rewards should return rewards_per_func and metrics
@@ -516,82 +515,6 @@ def _process_single_completion_for_eval(
     processed_metrics_for_return["reward"] = (
         total_reward_single  # Ensure 'reward' key exists
     )
-
-    # --- PDF Logging Section ---
-    # Only attempt PDF operations if story and styles are provided
-    if story is not None and styles is not None:
-        reward_breakdown_for_pdf = eval_class.get_reward_breakdown(
-            reward_scores_for_breakdown
-        )
-
-        # Add raw completion and its detailed scores to the PDF
-        # This was the problematic part: _add_completion_to_pdf
-        # It needs image handling as well if it's a GUI task for visualization
-
-        img_path_for_pdf_entry = None
-        if (
-            dataset_type == "gui"
-            and original_image_path
-            and vis_image_path_for_pdf
-            and gui_plotter
-        ):
-            try:
-                # Plot click for GUI task if a plotter is provided
-                if isinstance(
-                    eval_class, evaluator.GUIEvaluator
-                ):  # Check if it's the right evaluator
-                    parsed_click = eval_class._extract_coordinates(
-                        completion_text
-                    )  # Protected access, but used in main.py
-                    if parsed_click:
-                        pil_img = PILImage.open(original_image_path)
-                        plot_data = [
-                            {
-                                "name": "VLM Click",
-                                "center_x": parsed_click[0],
-                                "center_y": parsed_click[1],
-                                "is_truth": False,
-                            }
-                        ]
-                        # GUIGenerator.plot_predictions returns a PIL Image
-                        img_w_click = gui_plotter(pil_img, plot_data, pred_color="red")
-                        img_w_click.save(vis_image_path_for_pdf)
-                        img_path_for_pdf_entry = vis_image_path_for_pdf
-                    else:
-                        # If click not parsed, use original image for PDF (or None if vis_image_path_for_pdf was for specific click)
-                        img_path_for_pdf_entry = (
-                            original_image_path  # Or handle as per main.py logic
-                        )
-                else:
-                    img_path_for_pdf_entry = original_image_path  # Fallback for non-GUIEvaluator or if no click
-            except Exception as plot_err:
-                if verbose:  # Assuming verbose is accessible or passed
-                    print(
-                        f"  Warning: Error plotting click for PDF (utils): {plot_err}"
-                    )
-                img_path_for_pdf_entry = original_image_path  # Fallback
-        elif dataset_type != "gui" and original_image_path:
-            img_path_for_pdf_entry = original_image_path
-
-        _add_completion_to_pdf(
-            story,
-            styles,
-            completion_text,
-            reward_breakdown_for_pdf,  # Pass the breakdown
-            total_reward_single,  # Pass the total reward for this completion
-            completion_idx,
-            # image_path_for_completion_pdf=img_path_for_pdf_entry # Add this if _add_completion_to_pdf supports it
-            # For now, _add_completion_to_pdf from snippet doesn't take image path directly for completion.
-            # It's usually added in _add_example_header_to_pdf.
-            # If you want image per completion, _add_completion_to_pdf needs an update.
-        )
-
-        # Add PageBreak if needed (e.g., after every N completions)
-        # This logic might be better placed in the calling function (e.g., eval_on_test_set)
-        # as it depends on how many completions are processed per example.
-        # if (completion_idx + 1) % MAX_COMPLETIONS_PER_PAGE_PDF == 0:
-        # story.append(PageBreak())
-    # --- End PDF Logging Section ---
 
     return processed_metrics_for_return
 

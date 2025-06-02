@@ -8,8 +8,6 @@ import numpy as np  # Added numpy
 from typing import Optional
 
 from .base_evaluator import RewardEvaluator
-from .clock import ClockEvaluator
-from .correlation import CorrelationEvaluator
 from .gui import GUIEvaluator
 
 
@@ -26,11 +24,7 @@ def get_evaluator(name: str) -> RewardEvaluator:
     Raises:
         NotImplementedError: If evaluator for given task is not implemented
     """
-    if name.lower() == "clock":
-        return ClockEvaluator()
-    elif name.lower() == "correlation":
-        return CorrelationEvaluator()
-    elif name.lower() == "gui":
+    if name.lower() == "gui" or name.lower() == "gui_hard":
         return GUIEvaluator()
     else:
         raise NotImplementedError(

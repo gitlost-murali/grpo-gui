@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument(
         "--model_name_or_path",
         type=str,
-        default="Qwen/Qwen2.5-VL-7B-Instruct",
+        default="Qwen/Qwen2.5-VL-3B-Instruct",
         help="Model identifier for main and base model",
     )
     parser.add_argument(
@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument(
         "--eval_iterations",
         type=int,
-        default=5,
+        default=100,
         help="Number of iterations for evaluation",
     )
     parser.add_argument(
@@ -111,7 +111,7 @@ def parse_args():
     parser.add_argument(
         "--num_chains",
         type=int,
-        default=16,
+        default=4,
         help="Number of parallel generation chains",
     )
     parser.add_argument(
@@ -154,12 +154,12 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
     torch.set_float32_matmul_precision("high")
 
-    model, tokenizer = llms.get_llm_tokenizer(args.model_name_or_path, device)
-    base_model, _ = llms.get_llm_tokenizer(args.model_name_or_path, device)
+    model, tokenizer = llms.get_llm_tokenizer(args.model_name_or_path, device, quantized=False)
+    base_model, _ = llms.get_llm_tokenizer(args.model_name_or_path, device, quantized=False)
 
     print(f"Loading dataset: {args.dataset_type}")
     train_loader, test_loader = rldatasets.get_dataloaders(
-        args.dataset_type, dataset_size=10
+        args.dataset_type, dataset_size=100
     )
 
     print(f"Loading evaluator for: {args.dataset_type}")
@@ -270,6 +270,8 @@ if __name__ == "__main__":
                     f,
                     indent=4,
                 )
+            # Clear cache after evaluation to free memory before training continues
+            torch.cuda.empty_cache()
 
         # --- Reference Model Update --- (Run periodically)
         if args.update_ref_model and (round_num + 1) % args.update_ref_model_freq == 0:
@@ -321,6 +323,8 @@ if __name__ == "__main__":
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             optimizer.step()
             optimizer.zero_grad()
+            # Clear cache after optimizer step for memory efficiency
+            torch.cuda.empty_cache()
 
         # --- Checkpoint Saving & Training PDF Logging --- (Run periodically)
         if (round_num + 1) % args.save_steps == 0:
@@ -341,15 +345,6 @@ if __name__ == "__main__":
             )
             print(f"Checkpoint saved to {checkpoint_path}")
 
-        # --- Generate Training PDF Log for this round ---
-        generate_pdf_log(
-            round_num,
-            pdf_log_round_data,
-            train_pdf_dir,
-            args,
-            train_temp_vis_dir,
-            eval_class,
-        )
 
         # --- Logging Training Metrics --- (Run every round)
         train_metrics["learning_rate"] = scheduler.get_last_lr()[0]
@@ -372,9 +367,6 @@ if __name__ == "__main__":
         with open(os.path.join(train_log_dir, "train_logs.json"), "w") as f:
             json.dump(train_metrics_total, f, indent=4)
 
-        # Clear cache periodically
+        # Clear cache periodically for long-term memory management
         if round_num % 50 == 0:
             torch.cuda.empty_cache()
-
-        # Add after each major operation in the training loop
-        torch.cuda.empty_cache()

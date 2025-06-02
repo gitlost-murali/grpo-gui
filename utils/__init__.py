@@ -153,7 +153,7 @@ def get_per_token_logps(model, input_ids, attention_mask, logits_to_keep):
 
 
 def get_per_token_logps_vl(
-    model, input_ids, attention_mask, image_path, tokenizer, logits_to_keep, prompt
+    model, input_ids, attention_mask, image_path: str | PILImage.Image, tokenizer, logits_to_keep, prompt
 ):
     """
     We have the input ids - all the correct tokens including all chate templates/special tokens etc
@@ -183,7 +183,7 @@ def get_per_token_logps_vl(
     text = tokenizer.apply_chat_template(
         conversation, add_generation_prompt=True, tokenize=False, padding_side="left"
     )
-    image_inputs, video_inputs = process_vision_info(conversation)
+    image_inputs, video_inputs = process_vision_info(conversation) #type: ignore
 
     prompt_inputs = (
         tokenizer(

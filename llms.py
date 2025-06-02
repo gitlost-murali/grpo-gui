@@ -6,17 +6,17 @@ Module for loading LLMs and their tokenizers from huggingface.
 import argparse
 import torch
 from transformers import (
-    GenerationConfig,
-    PreTrainedModel,
-    PreTrainedTokenizerBase,
+    GenerationConfig, #type: ignore
+    PreTrainedModel, #type: ignore
+    PreTrainedTokenizerBase, #type: ignore
 )
 
 from transformers import (
-    Qwen2_5_VLForConditionalGeneration,
-    AutoProcessor,
+    Qwen2_5_VLForConditionalGeneration, #type: ignore
+    AutoProcessor, #type: ignore
 )
 from qwen_vl_utils import process_vision_info
-from transformers import BitsAndBytesConfig
+from transformers import BitsAndBytesConfig #type: ignore
 from PIL import Image
 
 
@@ -51,6 +51,9 @@ def get_llm_tokenizer(
         device_map="auto",
         quantization_config=nf4_config,
     )
+
+    # Enable gradient checkpointing to reduce memory usage
+    model.gradient_checkpointing_enable()
 
     # default processer
     processor = AutoProcessor.from_pretrained(model_name)
@@ -113,7 +116,7 @@ def generate_completions(
     text = tokenizer.apply_chat_template(
         conversation, add_generation_prompt=True, tokenize=False
     )
-    image_inputs, video_inputs = process_vision_info(conversation)
+    image_inputs, video_inputs = process_vision_info(conversation) #type: ignore
 
     # Ensure left padding for tokenizer/processor before tokenizing
     prompt_inputs = (
@@ -170,10 +173,10 @@ def generate_completions(
     # Do masking
     is_eos = completion_ids == tokenizer.tokenizer.eos_token_id
     eos_idx = torch.full(
-        (is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device
+        (is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=completion_ids.device
     )
     eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-    sequence_indices = torch.arange(is_eos.size(1), device=device).expand(
+    sequence_indices = torch.arange(is_eos.size(1), device=completion_ids.device).expand(
         is_eos.size(0), -1
     )
     completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()

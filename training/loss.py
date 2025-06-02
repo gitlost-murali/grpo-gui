@@ -4,10 +4,10 @@ from llms import generate_completions
 from shutil import copyfile
 from typing import Any
 import utils
-
+from PIL import Image as PILImage
 
 import torch
-from transformers import PreTrainedModel, PreTrainedTokenizerBase
+from transformers import PreTrainedModel, PreTrainedTokenizerBase #type: ignore
 
 
 import argparse
@@ -23,7 +23,7 @@ def compute_loss(
     completion_mask: torch.Tensor,
     advantages: torch.Tensor,
     args: argparse.Namespace,
-    img_path: str,
+    img_path: str | PILImage.Image,
     tokenizer: PreTrainedTokenizerBase,
     prompt: str,
 ) -> tuple[torch.Tensor, dict[str, float]]:
@@ -79,6 +79,9 @@ def compute_loss(
         - 1
     )
 
+    # Ensure advantages is on the same device as per_token_logps
+    advantages = advantages.to(per_token_logps.device)
+    
     # Compute loss with advantages
     per_token_loss = torch.exp(
         per_token_logps - per_token_logps.detach()
@@ -104,7 +107,7 @@ def score_completions(
     completions_text: list[str],
     prompt_data: Any,  # For GUI, this will be target_details_dict including dynamic_prompt
     # For Clock/Corr, this will be the static prompt string
-    image_path: str,
+    image_path: str | PILImage.Image,
     answer_data: Any,  # For GUI, this is target_details_dict (name, bbox, etc.)
     # For Clock/Corr, this is the answer string (time/R value)
     eval_class: evaluator.RewardEvaluator,
@@ -116,26 +119,21 @@ def score_completions(
     """
     log_data = {"prompt": {}, "generations": []}
 
-    if args.dataset_type == "gui":
+    if args.dataset_type == "gui" or args.dataset_type == "gui_hard":
         # prompt_data is target_details_dict from GUIDataLoader
         # answer_data is also target_details_dict
         log_data["prompt"] = {
             "text": prompt_data["dynamic_prompt"],  # The actual prompt shown to LLM
             "target_object_name": answer_data["name"],
             "target_object_bbox": answer_data["bounding_box"],
-            "image_path": image_path,
+            "image_path": image_path if isinstance(image_path, str) else "NA",
         }
         # The `answers` expected by GUIEvaluator.compute_rewards is a list of these answer_data dicts
         eval_answers_list = [answer_data] * len(completions_text)
     else:
-        # prompt_data is the static prompt string
-        # answer_data is the single answer string (time or R value)
-        log_data["prompt"] = {
-            "text": prompt_data,
-            "answer": answer_data,
-            "image_path": image_path,
-        }
-        eval_answers_list = [answer_data] * len(completions_text)
+        raise NotImplementedError(
+            f"Dataset type {args.dataset_type} not implemented for score_completions"
+        )
 
     # Format inputs as expected by evaluator
     mock_completions_for_eval = [
@@ -191,7 +189,7 @@ def grpo_loss(
     # For GUI, prompt_info_or_static_prompt will be target_details_dict
     # For Clock/Corr, it will be the static prompt string from the loader
     prompt_info_or_static_prompt: Any,
-    img_path: str,
+    img_path: str | PILImage.Image,
     # For GUI, answer_details_or_string will be target_details_dict
     # For Clock/Corr, it will be the answer string
     answer_details_or_string: Any,
@@ -205,7 +203,7 @@ def grpo_loss(
     Compute GRPO loss for a batch.
     Returns: loss, metrics, completions_text, rewards_per_func, advantages
     """
-    if args.dataset_type == "gui":
+    if args.dataset_type == "gui" or args.dataset_type == "gui_hard":
         # prompt_info_or_static_prompt is target_details_dict
         # answer_details_or_string is also target_details_dict
         current_prompt_text = prompt_info_or_static_prompt["dynamic_prompt"]
@@ -251,7 +249,10 @@ def grpo_loss(
     if not os.path.exists(
         image_log_path
     ):  # Save image only if it hasn't been saved for this round yet
-        copyfile(img_path, image_log_path)
+        if isinstance(img_path, PILImage.Image):
+            img_path.save(image_log_path)
+        else:
+            copyfile(img_path, image_log_path)
 
     completion_mask = attention_mask[:, prompt_ids.size(1) :]
     # Ensure current_prompt_text is used for get_per_token_logps_vl if it relies on it

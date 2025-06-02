@@ -28,6 +28,8 @@ def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader
         ValueError: If dataset_name is not supported.
     """
     dataset_size = kwargs.get("dataset_size", 50)
+    train_size = kwargs.get("train_size", dataset_size)
+    test_size = kwargs.get("test_size", dataset_size)
     image_width = kwargs.get("image_width", 224)
     image_height = kwargs.get("image_height", 224)
     # Get hard mode probability from kwargs, default to 0.1 for training
@@ -56,8 +58,8 @@ def get_dataloaders(dataset_name: str, **kwargs) -> Tuple[DataLoader, DataLoader
         )
         return trainloader, testloader
     elif dataset_name == "gui_hard":
-        trainloader = RealGUIDataLoader(is_train=True, dataset_size=dataset_size * 100)
-        testloader = RealGUIDataLoader(is_train=False, dataset_size=dataset_size)
+        trainloader = RealGUIDataLoader(is_train=True, train_test_split=0.8)
+        testloader = RealGUIDataLoader(is_train=False, train_test_split=0.2)
         return trainloader, testloader
     else:
         raise ValueError(

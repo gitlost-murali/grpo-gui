@@ -23,7 +23,7 @@ class RewardEvaluator(ABC):
         self,
         prompts: List[List[Dict[str, str]]],
         completions: List[List[Dict[str, str]]],
-        answer: Any,
+        answers: Any,
         device: str,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """

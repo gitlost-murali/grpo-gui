@@ -3,6 +3,9 @@ Implementation of GRPO, DeepSeek style training without external libraries
 """
 
 import os
+os.environ["HF_HOME"] = "/nfs/scratch-aa/.cache/huggingface/"
+
+import os
 import json
 import torch
 import argparse
@@ -17,7 +20,6 @@ import utils
 import evaluator
 import rldatasets as rldatasets
 from utils.pdf_logger import generate_pdf_log, pdf_log_info
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="GRPO training arguments")
@@ -129,6 +131,19 @@ def parse_args():
         default=786,
         help="Maximum completion length",
     )
+    # Dataset size limits (only applicable for gui_hard). If not provided, no limit is applied.
+    parser.add_argument(
+        "--train_size",
+        type=int,
+        default=None,
+        help="Limit for number of training samples (gui_hard only). If omitted, uses the full dataset.",
+    )
+    parser.add_argument(
+        "--test_size",
+        type=int,
+        default=None,
+        help="Limit for number of test samples (gui_hard only). If omitted, uses the full dataset.",
+    )
 
     # Training parameters
     parser.add_argument(
@@ -158,8 +173,15 @@ if __name__ == "__main__":
     base_model, _ = llms.get_llm_tokenizer(args.model_name_or_path, device, quantized=False)
 
     print(f"Loading dataset: {args.dataset_type}")
+
+    dataset_kwargs = {"dataset_size": 100}
+    if args.train_size is not None:
+        dataset_kwargs["train_size"] = args.train_size
+    if args.test_size is not None:
+        dataset_kwargs["test_size"] = args.test_size
+
     train_loader, test_loader = rldatasets.get_dataloaders(
-        args.dataset_type, dataset_size=100
+        args.dataset_type, **dataset_kwargs
     )
 
     print(f"Loading evaluator for: {args.dataset_type}")
